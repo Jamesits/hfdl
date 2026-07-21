@@ -15,6 +15,7 @@ High-speed Hugging Face downloader.
 - Use `log/slog` for logging; if logged arguments contain slices, wrap it with `logging.JSONValue` to keep spaces visible
 - Common hookable types e.g. logger, context and `http.Client` must always be passed from upstream to downstream; downstream packages should never create internal ones
 - Keep `cmd/*` lean, organize features into packages
+- Define magic literals as consts/vars
 
 ## Development
 Always perform a full rebuild with `goreleaser build --snapshot --clean`, and use the artifacts under `dist/`. When compiling individual programs for testing, output to `out/`. Run `go vet ./...` (must be run in `GOOS`/`GOARCH` matrix), `golangci-lint run` and `go fmt ./...` after code change.
