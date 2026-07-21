@@ -3,7 +3,7 @@ module github.com/jamesits/hfdl
 go 1.26.5
 
 require (
-	github.com/charmbracelet/bubbletea v1.3.10
+	github.com/charmbracelet/bubbletea/v2 v2.0.8
 	github.com/charmbracelet/lipgloss v1.1.0
 	github.com/dustin/go-humanize v1.0.1
 	github.com/oklog/ulid/v2 v2.1.1
