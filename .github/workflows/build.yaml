@@ -1,0 +1,46 @@
+on:
+  pull_request:
+    paths-ignore:
+      - 'README.md'
+      - 'doc/**'
+  push:
+    paths-ignore:
+      - 'README.md'
+      - 'doc/**'
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    name: Build
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - name: Harden Runner
+        uses: step-security/harden-runner@bf7454d06d71f1098171f2acdf0cd4708d7b5920 # v2.20.0
+        with:
+          egress-policy: block
+          allowed-endpoints: >
+            api.github.com:443
+            github.com:443
+            goreleaser.com:443
+            raw.githubusercontent.com:443
+            release-assets.githubusercontent.com:443
+            proxy.golang.org:443
+
+      - uses: actions/checkout@v7
+
+      - uses: actions/setup-go@v7
+        with:
+          go-version-file: 'go.mod'
+          cache: false
+
+      - run: go mod download
+
+      - name: Run GoReleaser
+        uses: goreleaser/goreleaser-action@v7
+        with:
+          # Snapshot mode runs the full release pipeline (archives + nfpm
+          # packages) without publishing anything.
+          args: release --clean --snapshot
