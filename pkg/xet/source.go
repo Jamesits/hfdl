@@ -1,0 +1,373 @@
+package xet
+
+import (
+	"context"
+	"fmt"
+	"io"
+	"log/slog"
+	"net/http"
+	"sort"
+	"sync"
+	"time"
+
+	"github.com/jamesits/hfdl/pkg/hfapi"
+	"github.com/jamesits/hfdl/pkg/logging"
+	"github.com/jamesits/hfdl/pkg/transfer"
+)
+
+// maxReacquires bounds per-file reconstruction reacquires: a presigned-URL
+// 403/expiry triggers a reacquire of the reconstruction, capped by this
+// budget. The budget is shared across all of a file's concurrent Opens,
+// matching hf_xet's single-flight refresh
+// (file_reconstruction/.../retrieval_urls.rs).
+const maxReacquires = 2
+
+// reacquireBaseBackoff seeds the exponential backoff before each reacquire.
+const reacquireBaseBackoff = 200 * time.Millisecond
+
+// Source is a transfer.BlockSource for one xet-backed file. Prepare must
+// complete before transfer uses it; Open is safe for concurrent blocks.
+type Source struct {
+	client *Client
+	log    *slog.Logger
+	fileID string // xet file id (keyed-BLAKE3 hex) — never a verify target
+	size   int64
+	route  string // token refresh route (from hfapi XetFileData)
+
+	mu         sync.Mutex
+	recon      *reconstruction
+	reacquires int
+}
+
+// Prepare fetches the file's full reconstruction (v2 with /v1 fallback).
+// Idempotent: a prepared Source is not re-fetched (reacquires during Open
+// go through reacquire()).
+func (s *Source) Prepare(ctx context.Context) error {
+	s.mu.Lock()
+	if s.recon != nil {
+		s.mu.Unlock()
+		return nil
+	}
+	s.mu.Unlock()
+
+	recon, err := s.client.fetchReconstruction(ctx, s.route, s.fileID, nil)
+	if err != nil {
+		return err
+	}
+	s.mu.Lock()
+	s.recon = recon
+	s.mu.Unlock()
+	return nil
+}
+
+func (s *Source) current() *reconstruction {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.recon
+}
+
+// Boundaries snaps block edges to term boundaries: fetched xorb bytes are
+// not file bytes, so reconstruction must start and end at term edges. Each
+// missing interval is split at the next term file-end edge and at the blockSize
+// grid, so no returned interval crosses a term boundary and none exceeds
+// blockSize. transfer chunks these at blockSize afterwards; for snapped
+// xet intervals that chunking is a no-op. Without a reconstruction the
+// intervals pass through unchanged (identity, like httpSource).
+func (s *Source) Boundaries(missing []transfer.Interval, blockSize int64) []transfer.Interval {
+	recon := s.current()
+	if recon == nil || len(recon.terms) == 0 {
+		return missing
+	}
+	var out []transfer.Interval
+	for _, m := range missing {
+		for p := m.Start; p < m.End; {
+			edge := m.End
+			if te := recon.nextTermEdge(p); te > p && te < edge {
+				edge = te
+			}
+			if blockSize > 0 {
+				if ge := (p/blockSize + 1) * blockSize; ge > p && ge < edge {
+					edge = ge
+				}
+			}
+			out = append(out, transfer.Interval{Start: p, End: edge})
+			p = edge
+		}
+	}
+	return out
+}
+
+// nextTermEdge returns the smallest term file-end strictly greater than pos
+// (or a term start if pos sits in a gap — defensive; a valid reconstruction
+// tiles the file contiguously).
+func (r *reconstruction) nextTermEdge(pos int64) int64 {
+	i := sort.Search(len(r.terms), func(i int) bool { return r.terms[i].fileEnd > pos })
+	if i >= len(r.terms) {
+		return -1
+	}
+	if r.terms[i].fileStart > pos {
+		return r.terms[i].fileStart
+	}
+	return r.terms[i].fileEnd
+}
+
+// Open streams decoded file bytes of [off, off+length). The returned reader
+// is backed by a producer goroutine; Close (or ctx cancel) unblocks it.
+func (s *Source) Open(ctx context.Context, off, length int64) (io.ReadCloser, error) {
+	recon := s.current()
+	if recon == nil {
+		return nil, ErrNotPrepared
+	}
+	if off < 0 || length < 0 || off+length > s.size {
+		return nil, fmt.Errorf("xet: open range [%d,%d) outside file size %d: %w", off, off+length, s.size, ErrRangeNotSatisfiable)
+	}
+	pr, pw := io.Pipe()
+	go s.stream(ctx, off, off+length, pw)
+	// io.Pipe writes don't observe ctx; closing the reader on cancel
+	// unblocks the producer with ErrClosedPipe.
+	stop := context.AfterFunc(ctx, func() { _ = pr.CloseWithError(ctx.Err()) })
+	return &reader{ReadCloser: pr, stop: stop}, nil
+}
+
+type reader struct {
+	io.ReadCloser
+	stop func() bool
+}
+
+func (r *reader) Close() error {
+	r.stop()
+	return r.ReadCloser.Close()
+}
+
+// stream walks the terms covering [off, end), writing decoded bytes in
+// order. Any error terminates the stream via CloseWithError; transfer
+// requeues the block.
+func (s *Source) stream(ctx context.Context, off, end int64, pw *io.PipeWriter) {
+	err := s.streamTerms(ctx, off, end, pw)
+	_ = pw.CloseWithError(err)
+}
+
+func (s *Source) streamTerms(ctx context.Context, off, end int64, pw *io.PipeWriter) error {
+	if off >= end {
+		return nil
+	}
+	for pos := off; pos < end; {
+		recon := s.current()
+		i := sort.Search(len(recon.terms), func(i int) bool { return recon.terms[i].fileEnd > pos })
+		if i >= len(recon.terms) {
+			return &DataError{Reason: fmt.Sprintf("no term covers file offset %d", pos)}
+		}
+		t := &recon.terms[i]
+		if t.fileStart > pos {
+			return &DataError{Reason: fmt.Sprintf("term gap at file offset %d", pos)}
+		}
+		// Decode the term's whole chunk range — chunk contents are only
+		// addressable by index, and signed ranges authorize whole chunk
+		// ranges, so partial-chunk-range fetching is impossible anyway.
+		// The chunk cache absorbs repeats when blockSize splits a term.
+		decoded, err := s.decodeTerm(ctx, t)
+		if err != nil {
+			return err
+		}
+		lo := max(pos, t.fileStart) - t.fileStart
+		hi := min(end, t.fileEnd) - t.fileStart
+		if _, err := pw.Write(decoded[lo:hi]); err != nil {
+			return err // reader gone or ctx cancelled
+		}
+		pos = t.fileEnd
+	}
+	return nil
+}
+
+// decodeTerm fetches and decodes every chunk of t, validating the result
+// against unpacked_length (LengthMismatchError on corruption).
+func (s *Source) decodeTerm(ctx context.Context, t *reconTerm) ([]byte, error) {
+	recon := s.current()
+	entries := coverRanges(recon.fetch[t.xorb], t.chunkStart, t.chunkEnd)
+	if entries == nil {
+		return nil, &DataError{
+			Xorb:   t.xorb,
+			Reason: fmt.Sprintf("fetch info cannot cover term chunk range [%d,%d)", t.chunkStart, t.chunkEnd),
+		}
+	}
+	var decoded []byte
+	for _, e := range entries {
+		raw, err := s.fetchSerialized(ctx, t.xorb, e)
+		if err != nil {
+			return nil, err
+		}
+		chunks, err := decodeXorbChunks(t.xorb, raw)
+		if err != nil {
+			return nil, err
+		}
+		if len(chunks) != int(e.chunkEnd-e.chunkStart) {
+			return nil, &DataError{
+				Xorb:   t.xorb,
+				Reason: fmt.Sprintf("serialized range holds %d chunks, authorized range [%d,%d) implies %d", len(chunks), e.chunkStart, e.chunkEnd, e.chunkEnd-e.chunkStart),
+			}
+		}
+		// An entry may span more chunks than this term needs; select the
+		// term's share.
+		lo := int(max(t.chunkStart, e.chunkStart) - e.chunkStart)
+		hi := int(min(t.chunkEnd, e.chunkEnd) - e.chunkStart)
+		for _, ch := range chunks[lo:hi] {
+			decoded = append(decoded, ch...)
+		}
+	}
+	if int64(len(decoded)) != t.unpackedLength {
+		return nil, &LengthMismatchError{
+			Xorb:       t.xorb,
+			ChunkStart: t.chunkStart,
+			ChunkEnd:   t.chunkEnd,
+			Want:       t.unpackedLength,
+			Got:        int64(len(decoded)),
+		}
+	}
+	return decoded, nil
+}
+
+// coverRanges tiles [start,end) with entries from fetch info, or nil when a
+// gap exists. Entries are sorted by chunkStart (normalize).
+func coverRanges(entries []fetchRange, start, end uint32) []fetchRange {
+	var out []fetchRange
+	cur := start
+	for cur < end {
+		advanced := false
+		for _, e := range entries {
+			if e.chunkStart <= cur && cur < e.chunkEnd {
+				out = append(out, e)
+				cur = e.chunkEnd
+				advanced = true
+				break
+			}
+		}
+		if !advanced {
+			return nil
+		}
+	}
+	return out
+}
+
+// fetchSerialized returns the authorized serialized range, from the chunk
+// cache when present, else from the signed URL (cached afterwards).
+func (s *Source) fetchSerialized(ctx context.Context, xorb string, e fetchRange) ([]byte, error) {
+	key := cacheKey{xorb: xorb, start: e.chunkStart, end: e.chunkEnd}
+	if cc := s.client.cache; cc != nil {
+		if b, ok := cc.Get(key); ok {
+			return b, nil
+		}
+	}
+	b, err := s.fetchRangeHTTP(ctx, xorb, e)
+	if err != nil {
+		return nil, err
+	}
+	if cc := s.client.cache; cc != nil {
+		cc.Put(key, b)
+	}
+	return b, nil
+}
+
+// fetchRangeHTTP GETs the signed range EXACTLY as authorized (Range:
+// bytes=start-end, inclusive end; no Authorization header — presigned URLs
+// are fetched with a plain client, remote_client.rs get_file_term_data).
+// A 403 (expired signature) triggers a bounded reconstruction reacquire,
+// after which the equivalent entry (same xorb + chunk range) is re-fetched
+// under its fresh URL.
+func (s *Source) fetchRangeHTTP(ctx context.Context, xorb string, e fetchRange) ([]byte, error) {
+	for {
+		b, forbidden, err := s.client.getSignedRange(ctx, e)
+		if !forbidden {
+			return b, err
+		}
+		s.log.Info("presigned URL rejected, reacquiring reconstruction", "xorb", xorb, "range", fmt.Sprintf("%d-%d", e.chunkStart, e.chunkEnd))
+		if rerr := s.reacquire(ctx); rerr != nil {
+			return nil, rerr
+		}
+		e2, ok := s.locateEntry(xorb, e.chunkStart, e.chunkEnd)
+		if !ok {
+			return nil, &DataError{
+				Xorb:   xorb,
+				Reason: fmt.Sprintf("reacquired reconstruction lost chunk range [%d,%d)", e.chunkStart, e.chunkEnd),
+			}
+		}
+		e = e2
+	}
+}
+
+// locateEntry finds the fetch entry for (xorb, chunkStart, chunkEnd) in the
+// current (post-reacquire) reconstruction.
+func (s *Source) locateEntry(xorb string, start, end uint32) (fetchRange, bool) {
+	recon := s.current()
+	for _, e := range recon.fetch[xorb] {
+		if e.chunkStart == start && e.chunkEnd == end {
+			return e, true
+		}
+	}
+	return fetchRange{}, false
+}
+
+// reacquire refreshes the file's reconstruction under a shared, bounded
+// budget with backoff; the mutex serializes concurrent refreshers into an
+// implicit single-flight.
+func (s *Source) reacquire(ctx context.Context) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.reacquires >= maxReacquires {
+		return &ReacquireError{Attempts: s.reacquires}
+	}
+	n := s.reacquires
+	s.reacquires++
+	backoff := reacquireBaseBackoff << n
+	timer := time.NewTimer(backoff)
+	select {
+	case <-ctx.Done():
+		timer.Stop()
+		return ctx.Err()
+	case <-timer.C:
+	}
+	recon, err := s.client.fetchReconstruction(ctx, s.route, s.fileID, nil)
+	if err != nil {
+		return err
+	}
+	s.recon = recon
+	s.log.Debug("reconstruction reacquired", "file", s.fileID, "attempt", n+1,
+		"terms", len(recon.terms), "ranges", logging.JSONValue(termRanges(recon)))
+	return nil
+}
+
+// getSignedRange performs one presigned range GET. forbidden=true flags a
+// 403 (caller reacquires). 429 is mapped to *hfapi.RateLimitError like CAS
+// 429s — sched owns the cooldown either way.
+func (c *Client) getSignedRange(ctx context.Context, e fetchRange) (b []byte, forbidden bool, err error) {
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, e.url, nil)
+	if err != nil {
+		return nil, false, fmt.Errorf("xet: build signed range request: %w", err)
+	}
+	req.Header.Set("Range", fmt.Sprintf("bytes=%d-%d", e.byteStart, e.byteEnd))
+	resp, err := c.hc.Do(req)
+	if err != nil {
+		return nil, false, fmt.Errorf("xet: signed range GET: %w", err)
+	}
+	defer resp.Body.Close()
+	switch resp.StatusCode {
+	case http.StatusOK, http.StatusPartialContent:
+	case http.StatusForbidden:
+		return nil, true, nil
+	case http.StatusTooManyRequests:
+		return nil, false, &hfapi.RateLimitError{RetryAfter: parseRetryAfter(resp.Header.Get("Retry-After"))}
+	default:
+		body, _ := io.ReadAll(io.LimitReader(resp.Body, maxErrorBody))
+		return nil, false, fmt.Errorf("xet: signed range GET: unexpected status %s: %s", resp.Status, string(body))
+	}
+	want := e.byteEnd - e.byteStart + 1
+	b, err = io.ReadAll(io.LimitReader(resp.Body, want+1))
+	if err != nil {
+		return nil, false, fmt.Errorf("xet: read signed range body: %w", err)
+	}
+	if int64(len(b)) != want {
+		return nil, false, &DataError{
+			Reason: fmt.Sprintf("signed range returned %d bytes, Range authorized %d", len(b), want),
+		}
+	}
+	return b, false, nil
+}

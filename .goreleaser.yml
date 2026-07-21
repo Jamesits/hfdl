@@ -1,0 +1,66 @@
+# yaml-language-server: $schema=https://goreleaser.com/static/schema.json
+
+version: 2
+
+project_name: hfdl
+
+before:
+  hooks:
+    - go mod verify
+
+builds:
+  - id: hfdl
+    main: ./cmd/hfdl
+    binary: hfdl
+    env:
+      - CGO_ENABLED=0
+    goos:
+      - linux
+      - windows
+      - darwin
+    goarch:
+      - amd64
+      - arm64
+    ldflags:
+      - -s -w
+      - -X github.com/jamesits/hfdl/pkg/config.Version={{.Version}}
+
+archives:
+  - id: hfdl
+    formats: [tar.gz]
+    name_template: "{{ .ProjectName }}_{{ .Version }}_{{ .Os }}_{{ .Arch }}"
+    format_overrides:
+      - goos: windows
+        formats: [zip]
+
+nfpms:
+  - id: hfdl
+    formats: [deb, rpm, apk, archlinux]
+    file_name_template: "{{ .ProjectName }}_{{ .Version }}_{{ .Os }}_{{ .Arch }}"
+    vendor: 'Jamesits'
+    maintainer: 'Jamesits <osscontrib@ciexyz.net>'
+    homepage: https://github.com/jamesits/hfdl
+    description: High-speed Hugging Face downloader
+    license: MIT
+
+checksum:
+  name_template: "checksums.txt"
+  algorithm: sha256
+
+snapshot:
+  version_template: "{{ incpatch .Version }}-snapshot"
+
+changelog:
+  sort: asc
+  filters:
+    exclude:
+      - "^docs:"
+      - "^test:"
+      - "^ci:"
+      - "^chore:"
+      - Merge pull request
+      - Merge branch
+
+release:
+  draft: false
+  prerelease: auto

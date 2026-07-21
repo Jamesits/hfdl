@@ -5,15 +5,14 @@ import (
 	"runtime"
 )
 
-var (
-	MajorVersion = 0
-	MinorVersion = 0
-	Revision     = 0
-	ProjectURL   = "https://github.com/jamesits/hfdl"
-)
+// Version is the build version stamp; goreleaser overrides it via
+// -X github.com/jamesits/hfdl/pkg/config.Version=...
+var Version = "0.0.0-dev"
+
+var ProjectURL = "https://github.com/jamesits/hfdl"
 
 func VersionString() string {
-	return fmt.Sprintf("%d.%d.%d", MajorVersion, MinorVersion, Revision)
+	return Version
 }
 
 func UserAgent() string {

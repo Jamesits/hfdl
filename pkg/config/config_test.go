@@ -1,0 +1,144 @@
+package config
+
+import (
+	"path/filepath"
+	"testing"
+	"time"
+)
+
+func envFrom(m map[string]string) func(string) string {
+	return func(k string) string { return m[k] }
+}
+
+func TestCacheDirPrecedence(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		flag string
+		env  map[string]string
+		want string
+	}{
+		{"flag wins", "/flag", map[string]string{"HF_HUB_CACHE": "/env", "HF_HOME": "/home"}, "/flag"},
+		{"HF_HUB_CACHE", "", map[string]string{"HF_HUB_CACHE": "/env", "HF_HOME": "/home"}, "/env"},
+		{"HF_HOME hub subdir", "", map[string]string{"HF_HOME": "/home"}, "/home/hub"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := CacheDir(tc.flag, envFrom(tc.env)); got != tc.want {
+				t.Fatalf("CacheDir(%q) = %q, want %q", tc.flag, got, tc.want)
+			}
+		})
+	}
+	// No env: falls under the user cache dir; must contain huggingface/hub.
+	got := CacheDir("", envFrom(nil))
+	if filepath.Base(filepath.Dir(got)) != "huggingface" || filepath.Base(got) != "hub" {
+		t.Fatalf("default cache dir shape: %q", got)
+	}
+}
+
+func TestEndpointsResolution(t *testing.T) {
+	if got := Endpoints([]string{"https://a", "https://b"}, envFrom(map[string]string{"HF_ENDPOINT": "https://env"})); len(got) != 2 || got[0] != "https://a" {
+		t.Fatalf("flag endpoints: %v", got)
+	}
+	if got := Endpoints(nil, envFrom(map[string]string{"HF_ENDPOINT": "https://env/"})); len(got) != 1 || got[0] != "https://env" {
+		t.Fatalf("env endpoint (trailing slash trimmed): %v", got)
+	}
+	if got := Endpoints(nil, envFrom(nil)); len(got) != 1 || got[0] != DefaultEndpoint {
+		t.Fatalf("default endpoint: %v", got)
+	}
+}
+
+func TestStateDBPath(t *testing.T) {
+	if got := StateDBPath("/x.db", "/cache"); got != "/x.db" {
+		t.Fatalf("flag: %q", got)
+	}
+	want := filepath.Join("/cache", ".hfdl", "state.db")
+	if got := StateDBPath("", "/cache"); got != want {
+		t.Fatalf("default: %q want %q", got, want)
+	}
+}
+
+func TestEnvDurations(t *testing.T) {
+	env := envFrom(map[string]string{
+		"HF_HUB_ETAG_TIMEOUT":     "2.5",
+		"HF_HUB_DOWNLOAD_TIMEOUT": "30s",
+	})
+	if got := ETagTimeout(env); got != 2500*time.Millisecond {
+		t.Fatalf("etag timeout float-seconds: %v", got)
+	}
+	if got := DownloadTimeout(env); got != 30*time.Second {
+		t.Fatalf("download timeout duration string: %v", got)
+	}
+	if got := ETagTimeout(envFrom(map[string]string{"HF_HUB_ETAG_TIMEOUT": "bogus"})); got != 10*time.Second {
+		t.Fatalf("invalid falls back to default: %v", got)
+	}
+	if got := DownloadTimeout(envFrom(nil)); got != 10*time.Second {
+		t.Fatalf("default: %v", got)
+	}
+}
+
+func TestOffline(t *testing.T) {
+	for v, want := range map[string]bool{"1": true, "true": true, "TRUE": true, "yes": true, "0": false, "false": false, "": false} {
+		if got := Offline(envFrom(map[string]string{"HF_HUB_OFFLINE": v})); got != want {
+			t.Fatalf("Offline(%q) = %v, want %v", v, got, want)
+		}
+	}
+}
+
+func TestParseSizeAndRate(t *testing.T) {
+	for in, want := range map[string]int64{
+		"32KiB": 32 * 1024, "8MiB": 8 << 20, "1GB": 1_000_000_000, "1048576": 1 << 20, "512": 512,
+	} {
+		if got, err := ParseSize(in); err != nil || got != want {
+			t.Fatalf("ParseSize(%q) = %d, %v; want %d", in, got, err, want)
+		}
+	}
+	if got, err := ParseRate("500MiB/s"); err != nil || got != 500<<20 {
+		t.Fatalf("ParseRate: %d, %v", got, err)
+	}
+	if got, err := ParseRate("100MB"); err != nil || got != 100_000_000 {
+		t.Fatalf("ParseRate no suffix: %d, %v", got, err)
+	}
+	if _, err := ParseSize("lots"); err == nil {
+		t.Fatal("invalid size accepted")
+	}
+	if _, err := ParseSize(""); err == nil {
+		t.Fatal("empty size accepted")
+	}
+}
+
+func TestParseEnums(t *testing.T) {
+	if m, err := ParseIOMode("direct"); err != nil || m != IODirect {
+		t.Fatalf("io-mode: %v %v", m, err)
+	}
+	if _, err := ParseIOMode("warp"); err == nil {
+		t.Fatal("bad io-mode accepted")
+	}
+	if p, err := ParseUpstreamPolicy("round-robin"); err != nil || p != RoundRobin {
+		t.Fatalf("policy: %v %v", p, err)
+	}
+	if _, err := ParseUpstreamPolicy("chaos"); err == nil {
+		t.Fatal("bad policy accepted")
+	}
+	if l, err := ParseLogLevel("warn"); err != nil || l != 4 {
+		t.Fatalf("level: %v %v", l, err)
+	}
+	if _, err := ParseLogLevel("shout"); err == nil {
+		t.Fatal("bad level accepted")
+	}
+}
+
+func TestLimitsValidate(t *testing.T) {
+	ok := DefaultLimits()
+	if err := ok.Validate(); err != nil {
+		t.Fatalf("defaults valid: %v", err)
+	}
+	bad := DefaultLimits()
+	bad.DiskActivePct = 101
+	if err := bad.Validate(); err == nil {
+		t.Fatal("disk-active 101 accepted")
+	}
+	bad = DefaultLimits()
+	bad.Conns = 0
+	if err := bad.Validate(); err == nil {
+		t.Fatal("connections 0 accepted")
+	}
+}
