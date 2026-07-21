@@ -170,6 +170,7 @@ func TestBuildPlanFlagEnvMatrix(t *testing.T) {
 				f.bandwidthStr = "500MiB/s"
 				f.apiIOPS = 9
 				f.diskActive = 55
+				f.diskWorkers = 3
 				f.stallTimeout = 3 * time.Second
 				f.stallMinStr = "1MiB"
 				f.blockSizeStr = "8MiB"
@@ -188,6 +189,9 @@ func TestBuildPlanFlagEnvMatrix(t *testing.T) {
 				}
 				if l.APIIOPS != 9 || l.DiskActivePct != 55 {
 					t.Fatalf("api/disk = %d/%d", l.APIIOPS, l.DiskActivePct)
+				}
+				if l.DiskWorkers != 3 {
+					t.Fatalf("disk-workers = %d", l.DiskWorkers)
 				}
 				if l.StallTimeout != 3*time.Second || l.StallMinBytes != 1<<20 {
 					t.Fatalf("stall = %v/%d", l.StallTimeout, l.StallMinBytes)
@@ -378,6 +382,7 @@ func TestBuildPlanErrors(t *testing.T) {
 		{"bad log-level", func(f *downloadFlags) { f.logLevelStr = "trace" }},
 		{"api-iops zero", func(f *downloadFlags) { f.apiIOPS = 0 }},
 		{"disk-active out of range", func(f *downloadFlags) { f.diskActive = 101 }},
+		{"disk-workers negative", func(f *downloadFlags) { f.diskWorkers = -1 }},
 		{"connections zero", func(f *downloadFlags) { f.connections = 0 }},
 		{"max-workers zero", func(f *downloadFlags) { f.maxWorkers = 0 }},
 		{"stall-timeout zero", func(f *downloadFlags) { f.stallTimeout = 0 }},

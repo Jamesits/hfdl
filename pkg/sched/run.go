@@ -81,7 +81,13 @@ func (m *Manager) Run(ctx context.Context) error {
 		m.wg.Add(1)
 		go m.downloadOrchestrator(runCtx)
 
-		diskN := diskWorkerCount(fs)
+		diskOverride := m.currentLimits().DiskWorkers
+		diskN := diskWorkerCount(fs, diskOverride)
+		if hardCap := maxDiskWorkers(); diskOverride > hardCap {
+			m.log.Warn("disk-workers clamped to keep a CPU free for network/meta/install",
+				"requested", diskOverride, "workers", diskN, "cap", hardCap)
+		}
+		m.log.Debug("disk queue depth", "workers", diskN, "fs", fs, "override", diskOverride)
 		m.wg.Add(diskN)
 		for range diskN {
 			go m.diskWorker(runCtx)

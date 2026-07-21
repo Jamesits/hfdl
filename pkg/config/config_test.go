@@ -141,4 +141,16 @@ func TestLimitsValidate(t *testing.T) {
 	if err := bad.Validate(); err == nil {
 		t.Fatal("connections 0 accepted")
 	}
+	bad = DefaultLimits()
+	bad.DiskWorkers = -1
+	if err := bad.Validate(); err == nil {
+		t.Fatal("disk-workers -1 accepted")
+	}
+	// 0 (auto) and positive overrides are valid; the runtime cap, not
+	// Validate, bounds the upper end.
+	ok = DefaultLimits()
+	ok.DiskWorkers = 16
+	if err := ok.Validate(); err != nil {
+		t.Fatalf("disk-workers 16 rejected: %v", err)
+	}
 }

@@ -49,6 +49,7 @@ type downloadFlags struct {
 	bandwidthStr   string
 	apiIOPS        int64
 	diskActive     int
+	diskWorkers    int
 	stallTimeout   time.Duration
 	stallMinStr    string
 	ioModeStr      string
@@ -106,6 +107,7 @@ func newDownloadCmd() *cobra.Command {
 	fl.StringVar(&f.bandwidthStr, "hfdl-max-bandwidth", "", "global download bandwidth cap (e.g. 500MiB/s; default unlimited)")
 	fl.Int64Var(&f.apiIOPS, "hfdl-api-iops", dfl.APIIOPS, "HF API requests per second (burst 10)")
 	fl.IntVar(&f.diskActive, "hfdl-disk-active", dfl.DiskActivePct, "disk duty-cycle ceiling 1-100 (percent)")
+	fl.IntVar(&f.diskWorkers, "hfdl-disk-workers", dfl.DiskWorkers, "disk-queue workers for hashing/salvage/copy (0 = auto)")
 	fl.DurationVar(&f.stallTimeout, "hfdl-stall-timeout", dfl.StallTimeout, "idle-read stall window")
 	fl.StringVar(&f.stallMinStr, "hfdl-stall-min-bytes", "32KiB", "minimum bytes per stall window before a connection is killed")
 	fl.StringVar(&f.ioModeStr, "hfdl-io-mode", config.IOBuffered.String(), "storage IO mode: buffered|direct|sequential")
@@ -159,6 +161,7 @@ func buildPlan(f *downloadFlags, getenv func(string) string) (*downloadPlan, err
 	limits.Conns = f.connections
 	limits.APIIOPS = f.apiIOPS
 	limits.DiskActivePct = f.diskActive
+	limits.DiskWorkers = f.diskWorkers
 	limits.StallTimeout = f.stallTimeout
 	limits.CheckpointInterval = f.checkpointIntv
 	if f.bandwidthStr != "" {

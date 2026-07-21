@@ -87,6 +87,7 @@ type Limits struct {
 	APIIOPS            int64         // HF API requests/sec, default 5
 	APIBurst           int64         // API bucket burst, default 10
 	DiskActivePct      int           // disk duty-cycle ceiling 1–100, default 100 (unlimited)
+	DiskWorkers        int           // disk-queue worker count; 0 = auto by media (SSD 2, else 1). Runtime-capped to GOMAXPROCS-1 to avoid CPU starvation (see sched.diskWorkerCount)
 	Conns              int           // per-file block connections, default 8
 	MaxWorkers         int           // files in downloading at once, default 8 (upstream parity flag)
 	BlockSize          int64         // 0 = adaptive: clamp(pow2(size/conns), 4MiB, 64MiB)
@@ -104,6 +105,7 @@ func DefaultLimits() Limits {
 		APIIOPS:            5,
 		APIBurst:           10,
 		DiskActivePct:      100,
+		DiskWorkers:        0, // auto: sched picks by media class
 		Conns:              8,
 		MaxWorkers:         8,
 		BlockSize:          0,
@@ -124,6 +126,9 @@ func (l *Limits) Validate() error {
 	}
 	if l.DiskActivePct < 1 || l.DiskActivePct > 100 {
 		return fmt.Errorf("disk-active must be 1-100, got %d", l.DiskActivePct)
+	}
+	if l.DiskWorkers < 0 {
+		return fmt.Errorf("disk-workers must be >= 0 (0 = auto), got %d", l.DiskWorkers)
 	}
 	if l.Conns < 1 {
 		return fmt.Errorf("connections must be >= 1, got %d", l.Conns)

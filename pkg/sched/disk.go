@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"os"
+	"runtime"
 	"time"
 
 	"github.com/jamesits/hfdl/pkg/fcio"
@@ -21,15 +22,36 @@ import (
 // verifier (hash + de-sparse) checkpoints the limiter internally, and copyFile
 // checkpoints it per chunk — so --disk-active throttles every heavy IO path.
 
-// diskWorkerCount is the IO depth by destination media: 2 on SSD, 1 on
-// HDD, NetFS or anything unrecognized.
-func diskWorkerCount(fs fcio.FsType) int {
-	switch fs {
-	case fcio.FsSSD:
-		return 2
-	default: // HDD, NetFS, Unknown: 1
-		return 1
+// diskWorkerCount returns the disk-queue depth. A positive override
+// (--hfdl-disk-workers) pins the count; override <= 0 auto-selects by
+// destination media: 2 on SSD, 1 on HDD/NetFS/anything unrecognized. The
+// result is always hard-capped by maxDiskWorkers so the disk pool — whose only
+// heavy CPU user is hashing — can never claim every schedulable thread and
+// starve the network/meta/install pools.
+func diskWorkerCount(fs fcio.FsType, override int) int {
+	n := override
+	if n <= 0 {
+		switch fs {
+		case fcio.FsSSD:
+			n = 2
+		default: // HDD, NetFS, Unknown: 1
+			n = 1
+		}
 	}
+	if hardCap := maxDiskWorkers(); n > hardCap {
+		n = hardCap
+	}
+	return n
+}
+
+// maxDiskWorkers is the starvation guard: at most GOMAXPROCS-1 disk workers so
+// at least one thread stays free for the network/meta/install pools, but never
+// below 1 (a single-core box still needs one worker to make progress).
+func maxDiskWorkers() int {
+	if n := runtime.GOMAXPROCS(0) - 1; n >= 1 {
+		return n
+	}
+	return 1
 }
 
 func (m *Manager) diskWorker(ctx context.Context) {
