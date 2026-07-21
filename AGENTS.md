@@ -16,6 +16,10 @@ High-speed Hugging Face downloader.
 - Common hookable types e.g. logger, context and `http.Client` must always be passed from upstream to downstream; downstream packages should never create internal ones
 - Keep `cmd/*` lean, organize features into packages
 - Define magic literals as consts/vars
+- Put all platform specific IO API abstractions in `pkg/fcio`
+
+## System Programming Guide
+- All IO operations with known access pattern (sequentical read/write, metadata access only) should be hinted to the OS
 
 ## Development
 Always perform a full rebuild with `goreleaser build --snapshot --clean`, and use the artifacts under `dist/`. When compiling individual programs for testing, output to `out/`. Run `go vet ./...` (must be run in `GOOS`/`GOARCH` matrix), `golangci-lint run` and `go fmt ./...` after code change.

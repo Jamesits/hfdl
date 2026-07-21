@@ -260,7 +260,7 @@ func (in *Installer) installLocalDir(ctx context.Context, r InstallRequest, blob
 	}
 	span.SetAttributes(attribute.String("mode", mode))
 
-	if err := syncFile(tmp); err != nil {
+	if err := fcio.SyncFile(ctx, tmp); err != nil {
 		_ = os.Remove(tmp)
 		span.RecordError(err)
 		span.SetStatus(codes.Error, err.Error())
@@ -309,7 +309,7 @@ func (in *Installer) installCopy(ctx context.Context, src, final string, size in
 	// Fsync the temp before the rename rather than trusting the copy callback
 	// to have fsynced: the callback is a seam and an injected/alternate copy
 	// may not fsync, so the durability barrier is owned here.
-	if err := syncFile(tmp); err != nil {
+	if err := fcio.SyncFile(ctx, tmp); err != nil {
 		_ = os.Remove(tmp)
 		span.RecordError(err)
 		span.SetStatus(codes.Error, err.Error())
