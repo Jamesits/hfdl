@@ -1,4 +1,4 @@
-//go:build !linux
+//go:build !linux && !windows && !darwin
 
 package fcio
 
@@ -10,14 +10,14 @@ import (
 	"os"
 )
 
-// Plain buffered implementation of the engine API for windows/darwin:
-// every file resolves to the plain tier, Fallocate degrades to
-// ftruncate, sparse APIs are no-ops, ProbeFs reports FsUnknown.
+// Plain buffered fallback for genuinely-unknown platforms (Windows and macOS
+// have real tiers in file_windows.go / file_darwin.go): every file resolves to
+// the plain tier, there is no sparse attribute, and ProbeFs reports FsUnknown.
 
-// Open creates (or opens) path; size >= 0 preallocates logically via
-// ftruncate. Windows has no fallocate equivalent — zero-fill preallocation
-// is self-defeating and SetFileValidData needs admin and can expose stale
-// disk contents — so grow-as-blocks-land is the designed default there.
+// Open creates (or opens) path; size >= 0 sets the logical size via ftruncate.
+// There is no fallocate here, so preallocation is grow-as-blocks-land; the
+// file is fully written by verify time, at which point the whole file reads as
+// one data extent (see DataExtents) — the honest non-sparse case.
 func (e *Engine) Open(ctx context.Context, path string, size int64, h Hints) (*File, error) {
 	if err := ctx.Err(); err != nil {
 		return nil, err
@@ -32,7 +32,6 @@ func (e *Engine) Open(ctx context.Context, path string, size int64, h Hints) (*F
 			f.Close()
 			return nil, fmt.Errorf("fcio: truncate %s: %w", path, err)
 		}
-		f.preallocated = true
 	}
 	return f, nil
 }
@@ -79,16 +78,20 @@ func (f *File) ReadAt(b *Buf, off int64) error {
 // DontNeed is a no-op on the plain tier.
 func (f *File) DontNeed(off, length int64) {}
 
-// Fallocate degrades to ftruncate.
+// Fallocate reports UNSUPPORTED honestly: there is no hole-to-allocated
+// conversion on this platform, so the de-sparse caller must run the zero-fill
+// walk. Faking success here (the former ftruncate-as-fallocate) silently
+// violated the dense-blob invariant (P0).
 func (f *File) Fallocate(size int64) error {
-	if err := f.f.Truncate(size); err != nil {
-		return fmt.Errorf("fcio: fallocate %s: %w", f.path, err)
-	}
-	return nil
+	return fmt.Errorf("fcio: fallocate %s: %w", f.path, ErrFallocateUnsupported)
 }
 
-// DataExtents reports the whole file as one extent (no sparse walk off
-// Linux).
+// DataExtents reports the whole file as one extent. Without a SEEK_HOLE /
+// QUERY_ALLOCATED_RANGES equivalent this is the only honest answer, and it is
+// correct for the case that reaches here: no sparse attribute was ever set and
+// the file is fully written by verify time, so it is genuinely non-sparse —
+// exactly the "whole file is one data extent" the de-sparse walk treats as a
+// no-op.
 func (f *File) DataExtents() ([][2]int64, error) {
 	fi, err := f.f.Stat()
 	if err != nil {
@@ -111,3 +114,6 @@ func (f *File) readChunk(p []byte, off int64, _ bool) (int, error) {
 }
 
 func (f *File) declareSequential() {}
+
+// clearSparse is a no-op: no sparse attribute exists on the plain fallback.
+func (f *File) clearSparse() error { return nil }

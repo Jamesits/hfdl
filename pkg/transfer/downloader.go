@@ -44,6 +44,11 @@ const (
 	leaseRePoll      = 100 * time.Millisecond
 	otelScope        = "hfdl.transfer"
 	maxFallbackTries = 8
+
+	// detachedOpTimeout bounds the detached (run-cancellation-surviving)
+	// checkpoint persists so a hung store/sink cannot wedge shutdown forever.
+	// Generous relative to the store's 5s busy_timeout, but finite.
+	detachedOpTimeout = 30 * time.Second
 )
 
 // FileTask is one file's download request. The caller (sched) has already
@@ -101,6 +106,12 @@ type Downloader struct {
 	tracer trace.Tracer
 	events chan Event
 
+	// droppedEvents counts lifecycle events dropped because the buffer was
+	// full (a slow or gone consumer). Events feed stats/OTel only, so dropping
+	// is preferable to wedging a worker — especially on the detached
+	// (never-cancelled) ctx used for done/requeue/checkpoint emits.
+	droppedEvents atomic.Int64
+
 	mu    sync.Mutex
 	files map[int64]*fileDownload
 }
@@ -144,6 +155,10 @@ func NewDownloader(cfg Config) *Downloader {
 // stall, checkpoint, requeued, rangeless). It is never closed; consumers
 // drain for the process lifetime.
 func (d *Downloader) Events() <-chan Event { return d.events }
+
+// DroppedEvents reports how many lifecycle events were dropped because the
+// buffer was full (no live/keeping-up consumer). Best-effort telemetry only.
+func (d *Downloader) DroppedEvents() int64 { return d.droppedEvents.Load() }
 
 // SetParallelism hot-updates the worker count of a running file: increase
 // spawns workers leasing pending blocks; decrease signals excess workers to
@@ -291,16 +306,21 @@ func (d *Downloader) Run(ctx context.Context, t *FileTask, sink *fcio.File, prog
 	fd.workersCtx, fd.cancelWorkers = context.WithCancel(ctx)
 	defer fd.cancelWorkers()
 
-	// Seed from the prior durable blob so checkpoint snapshots stay the
-	// full cumulative fsynced set across restarts (SaveProgress is replace).
+	// Seed from the prior durable blob so checkpoint snapshots stay the full
+	// cumulative fsynced set across restarts (SaveProgress is replace). A
+	// corrupt or size-mismatched blob is a typed reset, not a silent empty
+	// start: the blob is the only resume record, so the caller (sched) must
+	// deterministically reset the file to queued rather than have transfer
+	// quietly redownload from zero while the DB still holds the bad blob.
 	if len(task.Progress) > 0 {
 		var seed IntervalSet
-		if serr := seed.UnmarshalBinary(task.Progress); serr != nil || seed.size != task.Size {
-			fd.log.Warn("prior progress blob unusable, starting with an empty set",
-				"file_id", task.FileID, "err", serr)
-		} else {
-			fd.intervals.set = seed
+		if serr := seed.UnmarshalBinary(task.Progress); serr != nil {
+			return serr // *CorruptProgressError
 		}
+		if seed.size != task.Size {
+			return &CorruptProgressError{Reason: fmt.Sprintf("blob file size %d != task size %d", seed.size, task.Size)}
+		}
+		fd.intervals.set = seed
 	}
 
 	fd.src = task.Source
@@ -358,16 +378,28 @@ func (d *Downloader) Run(ctx context.Context, t *FileTask, sink *fcio.File, prog
 		fd.fileSpan.End()
 	}()
 
-	// Checkpoint ticker: per active file every CheckpointInterval.
+	// Checkpoint ticker: per active file every CheckpointInterval. It is
+	// explicitly stopped and joined after the workers finish (below) — it must
+	// not persist concurrently with the fallback interval reset or the final
+	// forced checkpoint, and its fail() write to runErr must be visible before
+	// the switch that reads runErr.
+	stopCkpt := make(chan struct{})
+	ckptDone := make(chan struct{})
 	go func() {
+		defer close(ckptDone)
 		tick := time.NewTicker(d.cfg.CheckpointInterval)
 		defer tick.Stop()
 		for {
 			select {
+			case <-stopCkpt:
+				return
 			case <-fd.workersCtx.Done():
 				return
 			case <-tick.C:
-				if cerr := fd.ckpt.checkpoint(fd.detached, false); cerr != nil {
+				cctx, ccancel := fd.detachedOp()
+				cerr := fd.ckpt.checkpoint(cctx, false)
+				ccancel()
+				if cerr != nil {
 					fd.fail(cerr)
 					return
 				}
@@ -387,8 +419,20 @@ func (d *Downloader) Run(ctx context.Context, t *FileTask, sink *fcio.File, prog
 	fd.setParallelism(task.Conns)
 	fd.wg.Wait()
 
+	// Stop and join the checkpoint ticker before touching the interval set or
+	// runErr: no checkpoint may run concurrently with the fallback reset/final
+	// checkpoint, and joining establishes the happens-before that makes any
+	// ticker fail() write to runErr visible to the read below.
+	close(stopCkpt)
+	<-ckptDone
+
 	if fd.fallbackNeeded.Load() && fd.runErr == nil && ctx.Err() == nil {
 		fd.fileSpan.AddEvent("single-stream fallback")
+		// Isolate fallback state: ranged-mode partial intervals are not
+		// resumable in single-stream mode, so drop them before fetching. A
+		// mid-fallback crash then leaves the DB claiming nothing (full
+		// redownload — documented), never ranges the fallback never re-fetched.
+		fd.intervals.reset(task.Size)
 		if ferr := fd.runFallback(ctx); ferr != nil {
 			fd.fail(ferr)
 		} else {
@@ -397,8 +441,11 @@ func (d *Downloader) Run(ctx context.Context, t *FileTask, sink *fcio.File, prog
 	}
 
 	// Final checkpoint: file completion / pause / shutdown — flush → fsync →
-	// persist, with a live context even when the run ctx is canceled.
-	ckErr := fd.ckpt.checkpoint(fd.detached, true)
+	// persist, with a detached but time-bounded context so it survives run
+	// cancellation without hanging shutdown on a stuck store/sink.
+	fctx, fcancel := fd.detachedOp()
+	ckErr := fd.ckpt.checkpoint(fctx, true)
+	fcancel()
 
 	switch {
 	case fd.runErr != nil:
@@ -409,6 +456,13 @@ func (d *Downloader) Run(ctx context.Context, t *FileTask, sink *fcio.File, prog
 		err = ckErr
 	}
 	return err
+}
+
+// detachedOp returns a detached (run-cancellation-surviving) context with a
+// finite deadline, for store/checkpoint calls that must persist during
+// shutdown yet must never hang it unboundedly.
+func (fd *fileDownload) detachedOp() (context.Context, context.CancelFunc) {
+	return context.WithTimeout(fd.detached, detachedOpTimeout)
 }
 
 // fail records the first terminal error and stops all workers.

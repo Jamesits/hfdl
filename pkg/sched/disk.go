@@ -14,10 +14,12 @@ import (
 	"github.com/jamesits/hfdl/pkg/verify"
 )
 
-// The disk queue serializes all heavy disk IO behind the DutyLimiter
-// and the VolumeSet R/W exclusion. Three item kinds, tried in order:
-// reference-hash (so salvage matches appear before downloads finish),
-// salvage-apply, then verify.
+// The disk queue serializes all heavy disk IO behind the DutyLimiter and the
+// VolumeSet R/W exclusion. Three item kinds, tried in order: reference-hash
+// (so salvage matches appear before downloads finish), salvage-apply, then
+// verify. All three run their reads/writes under the shared DutyLimiter: the
+// verifier (hash + de-sparse) checkpoints the limiter internally, and copyFile
+// checkpoints it per chunk — so --disk-active throttles every heavy IO path.
 
 // diskWorkerCount is the IO depth by destination media: 2 on SSD, 1 on
 // HDD, NetFS or anything unrecognized.
@@ -37,7 +39,7 @@ func (m *Manager) diskWorker(ctx context.Context) {
 		if ctx.Err() != nil {
 			return
 		}
-		done, err := m.tryReferenceHash(ctx, &calc)
+		done, err := m.tryReferenceHash(ctx)
 		if err != nil {
 			m.log.Warn("reference-hash failed", "err", err)
 		}
@@ -64,8 +66,10 @@ func (m *Manager) diskWorker(ctx context.Context) {
 	}
 }
 
-// tryReferenceHash leases one size-gated reference file and sha256s it.
-func (m *Manager) tryReferenceHash(ctx context.Context, calc *throttle.DutyCalc) (bool, error) {
+// tryReferenceHash leases one size-gated reference file and sha256s it. It
+// takes no DutyCalc: the verifier's Hash checkpoints the DutyLimiter itself,
+// so the reference read is already throttled by --disk-active.
+func (m *Manager) tryReferenceHash(ctx context.Context) (bool, error) {
 	ref, tok, err := m.st.LeaseReferenceHash(ctx, m.nowFn())
 	if errors.Is(err, store.ErrNoWork) {
 		return false, nil
@@ -78,12 +82,12 @@ func (m *Manager) tryReferenceHash(ctx context.Context, calc *throttle.DutyCalc)
 	// old invalidation key (size+mtime_ns+dev+ino) — refresh the row instead.
 	info, statErr := os.Stat(ref.Path)
 	if statErr == nil {
-		dev, ino := devIno(info)
+		dev, ino := devIno(ref.Path, info)
 		if info.Size() != ref.Size || info.ModTime().UnixNano() != ref.MtimeNs || dev != ref.Dev || ino != ref.Ino {
 			if ierr := m.storeCall(ctx, func() error { return m.st.InvalidateReference(ctx, ref.ID) }); ierr != nil {
 				return true, ierr
 			}
-			dev2, ino2 := devIno(info)
+			dev2, ino2 := devIno(ref.Path, info)
 			if aerr := m.st.AddReferenceFiles(ctx, []store.ReferenceFile{{
 				Path: ref.Path, Size: info.Size(), MtimeNs: info.ModTime().UnixNano(), Dev: dev2, Ino: ino2,
 			}}); aerr != nil {
@@ -141,11 +145,21 @@ func (m *Manager) tryReferenceHash(ctx context.Context, calc *throttle.DutyCalc)
 // covers both the reference and cache volumes. Durable-only order:
 // copy → fsync → SaveProgress(full interval) → transition to downloaded.
 func (m *Manager) trySalvageApply(ctx context.Context, calc *throttle.DutyCalc) (bool, error) {
-	f := m.pickSalvagingFile(ctx)
-	if f == nil {
+	f, tok, err := m.st.LeaseSalvage(ctx, m.nowFn())
+	if errors.Is(err, store.ErrNoWork) {
 		return false, nil
 	}
-	defer m.releaseSalvageClaim(f.ID)
+	if err != nil {
+		return false, err
+	}
+
+	// Heartbeat the salvage lease so a long copy is not reclaimed mid-flight;
+	// a crash requeues it via Recover (salvaging→queued).
+	hbCtx, hbStop := context.WithCancel(ctx)
+	defer hbStop()
+	go m.heartbeat(hbCtx, func(until time.Time) error {
+		return m.st.RenewLease(ctx, store.LeaseFile, f.ID, tok, until)
+	}, nil)
 
 	ref, err := m.findSalvageMatch(ctx, f)
 	if err != nil {
@@ -155,7 +169,7 @@ func (m *Manager) trySalvageApply(ctx context.Context, calc *throttle.DutyCalc) 
 		// The match disappeared (reference invalidated between gate and
 		// apply): hand the file back to the download queue.
 		if terr := m.storeCall(ctx, func() error {
-			return m.st.TransitionFile(ctx, f.ID, "", store.FileSalvaging, store.FileQueued, nil)
+			return m.st.TransitionFile(ctx, f.ID, tok, store.FileSalvaging, store.FileQueued, nil)
 		}); terr != nil {
 			return true, terr
 		}
@@ -180,7 +194,7 @@ func (m *Manager) trySalvageApply(ctx context.Context, calc *throttle.DutyCalc) 
 		m.log.Warn("salvage copy failed, falling back to download",
 			"file_id", f.ID, "reference", ref.Path, "err", err)
 		if terr := m.storeCall(ctx, func() error {
-			return m.st.TransitionFile(ctx, f.ID, "", store.FileSalvaging, store.FileQueued, err)
+			return m.st.TransitionFile(ctx, f.ID, tok, store.FileSalvaging, store.FileQueued, err)
 		}); terr != nil {
 			return true, terr
 		}
@@ -205,11 +219,11 @@ func (m *Manager) trySalvageApply(ctx context.Context, calc *throttle.DutyCalc) 
 	}
 
 	blob := fullIntervalBlob(size)
-	if err := m.st.SaveProgress(ctx, f.ID, "", blob); err != nil {
+	if err := m.st.SaveProgress(ctx, f.ID, tok, blob); err != nil {
 		return true, err
 	}
 	if err := m.storeCall(ctx, func() error {
-		return m.st.TransitionFile(ctx, f.ID, "", store.FileSalvaging, store.FileDownloaded, nil)
+		return m.st.TransitionFile(ctx, f.ID, tok, store.FileSalvaging, store.FileDownloaded, nil)
 	}); err != nil {
 		return true, err
 	}
@@ -297,6 +311,9 @@ func (m *Manager) tryVerify(ctx context.Context) (bool, error) {
 		}
 		var mm *verify.MismatchError
 		if errors.As(verr, &mm) {
+			// Genuine hash mismatch: the bytes are wrong. Count it toward the
+			// 2-strike budget (FailVerify resets the blocks and requeues, or
+			// errors the file at the bound).
 			if ferr := m.storeCall(ctx, func() error { return m.st.FailVerify(ctx, f.ID, tok, verr) }); ferr != nil {
 				return true, ferr
 			}
@@ -305,13 +322,19 @@ func (m *Manager) tryVerify(ctx context.Context) (bool, error) {
 			wake(m.wakeDownload)
 			return true, nil
 		}
-		// IO/infra failure: same requeue ladder as a mismatch (bounded by
-		// the store's verify_fails counter).
-		if ferr := m.storeCall(ctx, func() error { return m.st.FailVerify(ctx, f.ID, tok, verr) }); ferr != nil {
-			return true, ferr
+		// Non-mismatch infra/IO failure (open/fsync/de-sparse/read glitch): the
+		// downloaded bytes may be perfectly fine — we just could not verify
+		// them this time. Retry the verify WITHOUT consuming the hash-mismatch
+		// budget: a transient read error must never terminally fail a valid
+		// file (only two genuine mismatches may).
+		m.log.Warn("verify infra failure, retrying (not counted against verify budget)",
+			"file_id", f.ID, "path", f.Path, "err", verr)
+		if terr := m.storeCall(ctx, func() error {
+			return m.st.TransitionFile(ctx, f.ID, tok, store.FileVerifying, store.FileDownloaded, verr)
+		}); terr != nil && !errors.Is(terr, store.ErrFenced) {
+			return true, terr
 		}
-		m.afterFailVerify(ctx, f)
-		wake(m.wakeDownload)
+		wake(m.wakeDisk)
 		return true, nil
 	}
 
@@ -398,35 +421,6 @@ func (m *Manager) afterFailVerify(ctx context.Context, f *store.File) {
 	}
 	m.filesFailed.Add(ctx, 1)
 	m.recordError(fmt.Errorf("sched: file %s: verify failed", f.Path))
-}
-
-// pickSalvagingFile claims one 'salvaging' file in memory (the claim is
-// tokenless by design — the status flip itself is the exclusion, and hfdl
-// is single-process per state DB).
-func (m *Manager) pickSalvagingFile(ctx context.Context) *store.File {
-	var files []store.File
-	if err := m.st.DB().NewSelect().Model(&files).
-		Where("status = ?", string(store.FileSalvaging)).
-		Order("id").
-		Limit(8).
-		Scan(ctx); err != nil {
-		return nil
-	}
-	m.salvageMu.Lock()
-	defer m.salvageMu.Unlock()
-	for i := range files {
-		if !m.salvageClaim[files[i].ID] {
-			m.salvageClaim[files[i].ID] = true
-			return &files[i]
-		}
-	}
-	return nil
-}
-
-func (m *Manager) releaseSalvageClaim(fileID int64) {
-	m.salvageMu.Lock()
-	delete(m.salvageClaim, fileID)
-	m.salvageMu.Unlock()
 }
 
 // acquireRead takes the VolumeSet read slot for a path.

@@ -22,6 +22,7 @@ func (m *Manager) SetLimits(l config.Limits) {
 
 	m.limitsMu.Lock()
 	m.limits = l
+	m.limitsSet = true
 	m.limitsMu.Unlock()
 
 	if m.cfg.Bandwidth != nil && l.MaxBandwidthBps > 0 {
@@ -68,13 +69,31 @@ func (m *Manager) SetLimits(l config.Limits) {
 	}
 }
 
-// loadPersistedLimits restores the operator's last settings from the kv
-// table. Called
-// once at Run start — the first point a caller ctx exists.
+// loadPersistedLimits reconciles persisted limits with this invocation's, at
+// Run start (the first point a caller ctx exists). The invocation's explicit
+// limits win: if any SetLimits already ran (CLI flags via Submit, or a direct
+// SetLimits), the persisted KV is NOT reloaded — reloading would clobber the
+// operator's just-applied settings with a stale value. Instead the current
+// limits are persisted so a later restart with no flags can restore them. Only
+// when no explicit limits were applied do we restore from the KV.
 func (m *Manager) loadPersistedLimits(ctx context.Context) {
 	if m.st == nil {
 		return
 	}
+	m.limitsMu.RLock()
+	explicit := m.limitsSet
+	current := m.limits
+	m.limitsMu.RUnlock()
+
+	if explicit {
+		if blob, err := json.Marshal(current); err == nil {
+			if serr := m.st.SetKV(ctx, kvLimitsKey, string(blob)); serr != nil {
+				m.log.Debug("persist limits failed", "err", serr)
+			}
+		}
+		return
+	}
+
 	raw, err := m.st.GetKV(ctx, kvLimitsKey)
 	if err != nil || raw == "" {
 		return

@@ -68,9 +68,12 @@ func (e *Engine) Open(ctx context.Context, path string, size int64, h Hints) (*F
 			f.tier = tierDirect
 			f.align = caps.Align
 		case errors.Is(err, unix.EINVAL) || errors.Is(err, unix.EOPNOTSUPP):
-			// O_DIRECT accepted at probe time but rejected for this file;
-			// downgrade this file rather than failing the download.
-			e.logDebug("O_DIRECT open rejected; file on fadvise tier", "path", path, "err", err)
+			// O_DIRECT accepted at probe time but rejected for this file:
+			// downgrade this file now (first-hit fallback) and settle the
+			// whole volume to fadvise via the CapsCache so sibling files skip
+			// the doomed O_DIRECT open.
+			e.logDebug("O_DIRECT open rejected; downgrading file and volume to fadvise", "path", path, "err", err)
+			e.downgradeVolumeDirect(ctx, path, caps.Align)
 			f.tier = tierFadvise
 		default:
 			return nil, fmt.Errorf("fcio: open direct %s: %w", path, err)
@@ -239,3 +242,7 @@ func (f *File) declareSequential() {
 	}
 	_ = unix.Fadvise(int(f.f.Fd()), 0, 0, posixFadvSequential)
 }
+
+// clearSparse is a no-op on Linux: the fallocate/SEEK_HOLE de-sparse path
+// leaves the blob dense with no sparse attribute to strip.
+func (f *File) clearSparse() error { return nil }

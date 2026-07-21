@@ -23,7 +23,15 @@ import (
 // monotonic access counter is seeded from file mtimes so cold-start
 // eviction order approximates real recency. A single mutex guards metadata
 // and file IO: cache traffic is block-sized and infrequent relative to
-// decode work, and the lock makes eviction-vs-read races impossible.
+// decode work, and the lock makes eviction-vs-read races impossible within a
+// process.
+//
+// TODO(cross-platform): the in-process mutex does NOT coordinate with other
+// processes (e.g. a concurrent hf_xet) sharing this dir — hf_xet uses a
+// per-file lock which is not replicated here. Likewise Put's os.Rename onto an
+// existing entry replaces content atomically on POSIX but on Windows can fail
+// or leave stale content when the destination exists. Both are deferred to the
+// cross-platform pass.
 //
 // The cache is best-effort: any IO inconsistency degrades to a miss (or a
 // dropped put), never to a failed download.
@@ -44,6 +52,12 @@ type chunkCache struct {
 
 	mu      sync.Mutex
 	entries map[cacheKey]*cacheEntry
+	// pending holds entries chosen for eviction whose on-disk file could not
+	// be removed. Their size stays counted in total (so the cap is honestly
+	// reported as exceeded, never silently under-counted) until a later
+	// removal attempt succeeds; they are no longer in entries so eviction
+	// won't reconsider and spin on them.
+	pending map[cacheKey]*cacheEntry
 	total   int64
 	clock   int64
 }
@@ -56,6 +70,7 @@ func openChunkCache(dir string, maxBytes int64) (*chunkCache, error) {
 		dir:      dir,
 		maxBytes: maxBytes,
 		entries:  make(map[cacheKey]*cacheEntry),
+		pending:  make(map[cacheKey]*cacheEntry),
 	}
 	// Rebuild the index. Unknown files are ignored (never deleted): the dir
 	// may be shared with hf_xet itself.
@@ -182,6 +197,9 @@ func (c *chunkCache) Put(key cacheKey, data []byte) {
 		_ = os.Remove(tmpName)
 		return
 	}
+	// TODO(cross-platform): on Windows os.Rename onto an existing p can fail
+	// or keep stale content; a MoveFileEx/ReplaceFile-style replace is needed
+	// there (see the package-level note).
 	if err := os.Rename(tmpName, p); err != nil {
 		_ = os.Remove(tmpName)
 		return
@@ -196,7 +214,11 @@ func (c *chunkCache) Put(key cacheKey, data []byte) {
 }
 
 // evictLocked drops least-recently-used entries until total <= maxBytes.
+// Accounting (total) is only decremented once a file is actually gone: an
+// entry whose file cannot be removed is set aside in pending (still counted)
+// so the cap is never silently under-counted, and is retried on later traffic.
 func (c *chunkCache) evictLocked() {
+	c.reapPendingLocked()
 	for c.total > c.maxBytes && len(c.entries) > 0 {
 		var oldest cacheKey
 		var oldestAtime int64 = -1
@@ -209,9 +231,21 @@ func (c *chunkCache) evictLocked() {
 		if err := os.Remove(c.path(oldest)); err == nil || os.IsNotExist(err) {
 			delete(c.entries, oldest)
 			c.total -= e.size
-		} else {
-			// Un-removable file: forget the entry anyway or we spin forever.
-			delete(c.entries, oldest)
+			continue
+		}
+		// Real removal failure: keep the bytes accounted (don't subtract) but
+		// move the entry aside so it isn't re-selected and we don't spin.
+		delete(c.entries, oldest)
+		c.pending[oldest] = e
+	}
+}
+
+// reapPendingLocked retries removal of entries whose earlier eviction failed;
+// accounting is dropped only when the file is confirmed gone.
+func (c *chunkCache) reapPendingLocked() {
+	for k, e := range c.pending {
+		if err := os.Remove(c.path(k)); err == nil || os.IsNotExist(err) {
+			delete(c.pending, k)
 			c.total -= e.size
 		}
 	}

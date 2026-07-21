@@ -14,7 +14,7 @@ import (
 // blob id), third line a Unix timestamp float, each newline-terminated.
 func (in *Installer) writeDownloadMetadata(destDir, repoPath, commitSHA, etag string) error {
 	metaRoot := filepath.Join(destDir, ".cache", "huggingface", "download")
-	metaPath, err := SafeJoin(metaRoot, repoPath+".metadata")
+	metaPath, err := SafeJoinContent(metaRoot, repoPath+".metadata")
 	if err != nil {
 		return err
 	}

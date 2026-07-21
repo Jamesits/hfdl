@@ -471,19 +471,20 @@ func TestFinalPath(t *testing.T) {
 	})
 }
 
-// TestFinalOutputParity pins the huggingface_hub 1.24.0 stdout format:
-// non-quiet prints path=<abspath>, quiet prints the bare path — regardless
-// of TTY and of cache vs local-dir mode.
+// TestFinalOutputParity pins the huggingface_hub 1.24.0 stdout format: the
+// bare absolute local path and nothing else, in every mode — quiet or not,
+// TTY or not, cache or local-dir. No "path=" prefix (that would break
+// `LOCAL=$(hf download ...)` capture in existing scripts).
 func TestFinalOutputParity(t *testing.T) {
 	snap := &sched.Stats{CommitSHA: "abc123"}
 
-	t.Run("non-quiet cache dir gets path= prefix", func(t *testing.T) {
+	t.Run("non-quiet cache dir is bare", func(t *testing.T) {
 		p, err := buildPlan(baseFlags(), getenvMap(map[string]string{"HF_HUB_CACHE": "/cache"}))
 		if err != nil {
 			t.Fatal(err)
 		}
-		got := finalOutput(p, snap)
-		want := "path=/cache/models--org--repo/snapshots/abc123"
+		got := finalPath(p, snap)
+		want := "/cache/models--org--repo/snapshots/abc123"
 		if got != want {
 			t.Fatalf("got %q, want %q", got, want)
 		}
@@ -495,13 +496,13 @@ func TestFinalOutputParity(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
-		got := finalOutput(p, snap)
+		got := finalPath(p, snap)
 		want := "/cache/models--org--repo/snapshots/abc123"
 		if got != want {
 			t.Fatalf("got %q, want %q", got, want)
 		}
 	})
-	t.Run("non-quiet local-dir single file gets path= prefix", func(t *testing.T) {
+	t.Run("non-quiet local-dir single file is bare", func(t *testing.T) {
 		f := baseFlags()
 		f.localDir = "/out"
 		f.filenames = []string{"config.json"}
@@ -509,8 +510,8 @@ func TestFinalOutputParity(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
-		got := finalOutput(p, snap)
-		want := "path=/out/config.json"
+		got := finalPath(p, snap)
+		want := "/out/config.json"
 		if got != want {
 			t.Fatalf("got %q, want %q", got, want)
 		}
@@ -524,7 +525,7 @@ func TestFinalOutputParity(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
-		got := finalOutput(p, snap)
+		got := finalPath(p, snap)
 		want := "/out/config.json"
 		if got != want {
 			t.Fatalf("got %q, want %q", got, want)

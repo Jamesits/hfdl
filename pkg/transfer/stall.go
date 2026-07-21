@@ -75,16 +75,24 @@ func newStallMonitor(window time.Duration, floor int64) *stallMonitor {
 }
 
 // connTrack is one connection's stall state. windowBytes is atomic: the
-// streaming goroutine adds on every read while the eval ticker swaps.
+// streaming goroutine adds on every read while the eval sweep swaps.
+//
+// sinceFloorBytes accumulates application bytes since the last window that met
+// the floor; it is the hard-ceiling's measure of TRUE progress (distinct from
+// "time below floor"): a conn delivering at least one floor's worth of bytes
+// per hardStallFactor windows is progressing, however slowly, and is never
+// hard-killed — the plan never fights a slow network.
 type connTrack struct {
 	mon *stallMonitor
 
-	start     time.Time
-	lastFloor time.Time // last window end that met the floor (init: start)
-	above     bool      // last evaluated window met the floor
-	killed    bool
-	reason    stallReason
-	cancel    context.CancelFunc
+	start           time.Time
+	windowStart     time.Time // start of the current, not-yet-evaluated window
+	lastFloor       time.Time // last window end that met the floor (init: start)
+	sinceFloorBytes int64     // bytes since lastFloor (hard-ceiling no-progress measure)
+	above           bool      // current window met the floor
+	killed          bool
+	reason          stallReason
+	cancel          context.CancelFunc
 
 	windowBytes atomic.Int64
 	stop        chan struct{} // closed by connEnd
@@ -94,14 +102,16 @@ type connTrack struct {
 // connStart registers a connection, arming its idle deadline from byte 0.
 // cancel is the attempt-context cancel the monitor invokes on a kill.
 func (m *stallMonitor) connStart(cancel context.CancelFunc) *connTrack {
+	now := m.now()
 	c := &connTrack{
-		mon:    m,
-		start:  m.now(),
-		cancel: cancel,
-		stop:   make(chan struct{}),
-		done:   make(chan struct{}),
+		mon:         m,
+		start:       now,
+		windowStart: now,
+		lastFloor:   now,
+		cancel:      cancel,
+		stop:        make(chan struct{}),
+		done:        make(chan struct{}),
 	}
-	c.lastFloor = c.start
 	m.mu.Lock()
 	m.conns[c] = struct{}{}
 	m.mu.Unlock()
@@ -130,7 +140,9 @@ func (c *connTrack) killReason() stallReason {
 	return c.reason
 }
 
-// watch evaluates the connection once per window until connEnd.
+// watch drives the synchronized sweep once per window until connEnd. Every
+// live connection's watcher calls sweep, which is idempotent per window
+// boundary, so a full sweep runs regardless of which connection ticked.
 func (m *stallMonitor) watch(c *connTrack) {
 	defer close(c.done)
 	t := time.NewTicker(m.window)
@@ -138,51 +150,77 @@ func (m *stallMonitor) watch(c *connTrack) {
 	for {
 		select {
 		case <-t.C:
-			m.mu.Lock()
-			m.evalLocked(c, m.now())
-			m.mu.Unlock()
+			m.sweep(m.now())
 		case <-c.stop:
 			return
 		}
 	}
 }
 
-// evalLocked applies layers 2–4 for one elapsed window.
-func (m *stallMonitor) evalLocked(c *connTrack, now time.Time) {
-	if c.killed {
+// sweep evaluates the whole connection set for the elapsed window in two
+// phases: first roll every conn whose window fully elapsed and record this
+// window's verdict, then apply the kill layers. Computing all verdicts before
+// any kill decision means layer 4's hysteresis sees a consistent same-window
+// view of every peer — never a stale previous-window "above" verdict, which
+// used to soft-kill a conn on a peer's about-to-be-updated result.
+func (m *stallMonitor) sweep(now time.Time) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+
+	type rolled struct {
+		c   *connTrack
+		wb  int64
+		met bool
+	}
+	var due []rolled
+	for c := range m.conns {
+		if c.killed || now.Sub(c.windowStart) < m.window {
+			continue // killed, or window not fully elapsed (warmup / mid-window)
+		}
+		wb := c.windowBytes.Swap(0)
+		c.windowStart = c.windowStart.Add(m.window)
+		c.sinceFloorBytes += wb
+		met := m.floor <= 0 || wb >= m.floor
+		if met {
+			c.lastFloor = now
+			c.sinceFloorBytes = 0
+			c.above = true
+			m.armed = true // the path proved it can beat the floor
+		} else {
+			c.above = false
+		}
+		due = append(due, rolled{c, wb, met})
+	}
+	if len(due) == 0 {
 		return
 	}
-	wb := c.windowBytes.Swap(0)
+	anyAbove := m.anyAboveFloorLocked() // now reflects only this window's verdicts
 
-	// Layer 2: idle-read deadline — zero bytes for a full window.
-	if wb == 0 {
-		m.killLocked(c, stallIdle)
-		return
-	}
-
-	met := m.floor <= 0 || wb >= m.floor
-	if met {
-		c.lastFloor = now
-		c.above = true
-		// Arming: the path has proven it can beat the floor, so dropping
-		// below it is a stall, not "just a slow network".
-		m.armed = true
-	} else {
-		c.above = false
-	}
-
-	// Layer 3: hard no-progress ceiling — never suspended, warmup included.
-	if now.Sub(c.lastFloor) >= hardStallFactor*m.window {
-		m.killLocked(c, stallHardCeiling)
-		return
-	}
-
-	// Layer 4: soft throughput floor. Requires the file armed, this conn
-	// below floor, and hysteresis clear (some active conn above floor).
-	// Warmup is implicit: the first evaluation happens exactly one full
-	// window after connect.
-	if m.armed && !met && m.anyAboveFloorLocked() {
-		m.killLocked(c, stallSoftFloor)
+	for _, r := range due {
+		c := r.c
+		if c.killed {
+			continue
+		}
+		// Layer 2: idle-read deadline — zero bytes for a full window.
+		if r.wb == 0 {
+			m.killLocked(c, stallIdle)
+			continue
+		}
+		// Layer 3: hard no-progress ceiling — never suspended. Fires only on
+		// TRUE no-progress: fewer than one floor's worth of bytes delivered in
+		// hardStallFactor windows since the last floor-meeting window. A
+		// steadily slow-but-progressing conn keeps sinceFloorBytes at or above
+		// the floor and survives; a ~hung trickle (e.g. a byte per window)
+		// eventually trips it even with --connections 1.
+		if now.Sub(c.lastFloor) >= hardStallFactor*m.window && c.sinceFloorBytes < m.floor {
+			m.killLocked(c, stallHardCeiling)
+			continue
+		}
+		// Layer 4: soft throughput floor. Armed file, this conn below floor,
+		// and hysteresis clear (some conn is above the floor THIS window).
+		if m.armed && !r.met && anyAbove {
+			m.killLocked(c, stallSoftFloor)
+		}
 	}
 }
 
@@ -214,12 +252,13 @@ func (m *stallMonitor) armedState() (bool, bool) {
 // cancel side effects, for deterministic clock-driven evaluation.
 func (m *stallMonitor) driveConn(start time.Time) *connTrack {
 	c := &connTrack{
-		mon:       m,
-		start:     start,
-		lastFloor: start,
-		cancel:    func() {},
-		stop:      make(chan struct{}),
-		done:      make(chan struct{}),
+		mon:         m,
+		start:       start,
+		windowStart: start,
+		lastFloor:   start,
+		cancel:      func() {},
+		stop:        make(chan struct{}),
+		done:        make(chan struct{}),
 	}
 	close(c.done) // no watcher runs for driven conns
 	m.mu.Lock()
@@ -228,9 +267,9 @@ func (m *stallMonitor) driveConn(start time.Time) *connTrack {
 	return c
 }
 
-// driveEval is the test seam: evaluate one window at an injected clock time.
-func (m *stallMonitor) driveEval(c *connTrack, now time.Time) {
-	m.mu.Lock()
-	m.evalLocked(c, now)
-	m.mu.Unlock()
+// driveSweep is the test seam: run one synchronized sweep at an injected clock
+// time, evaluating every registered conn whose window elapsed — the same code
+// path production uses, so hysteresis consistency is exercised deterministically.
+func (m *stallMonitor) driveSweep(now time.Time) {
+	m.sweep(now)
 }

@@ -44,6 +44,21 @@ func (m *Manager) metaWorker(ctx context.Context) {
 			}
 			continue
 		}
+		// Gate before processing: if this repo's
+		// endpoint is in a 429 cooldown, do NOT hold the listing lease across
+		// the (possibly minutes-long) wait. Defer the row until the cooldown
+		// expires — without counting a retry, since a gate deferral is not a
+		// failure — so it re-leases when the gate lifts.
+		if until, cerr := m.st.CooldownUntil(ctx, repo.Endpoint, store.CooldownAPI); cerr == nil &&
+			!until.IsZero() && m.nowFn().Before(until) {
+			dctx := m.detachedCtxOr(ctx)
+			if rerr := m.storeCall(dctx, func() error {
+				return m.st.DeferMeta(dctx, repo.ID, tok, until)
+			}); rerr != nil && !errors.Is(rerr, store.ErrFenced) {
+				m.log.Warn("defer meta on cooldown failed", "repo_id", repo.ID, "err", rerr)
+			}
+			continue
+		}
 		m.processRepo(ctx, repo, tok)
 	}
 }
@@ -63,7 +78,7 @@ func (m *Manager) processRepo(ctx context.Context, repo *store.Repo, tok store.L
 	// would otherwise strand it until lease expiry).
 	release := func(cause error) {
 		if rerr := m.storeCall(m.detachedCtxOr(ctx), func() error {
-			return m.st.ReleaseMeta(m.detachedCtxOr(ctx), repo.ID, tok, cause)
+			return m.st.ReleaseMeta(m.detachedCtxOr(ctx), repo.ID, tok, time.Time{}, cause)
 		}); rerr != nil && !errors.Is(rerr, store.ErrFenced) {
 			log.Warn("release meta failed", "err", rerr)
 		}
@@ -288,7 +303,9 @@ func (m *Manager) handleMetaError(ctx context.Context, repo *store.Repo, tok sto
 		if cerr := m.setCooldown(ctx, repo.Endpoint, store.CooldownAPI, rl.RetryAfter, repo.Retries, "hub api 429"); cerr != nil {
 			log.Warn("set cooldown failed", "err", cerr)
 		}
-		if rerr := m.storeCall(dctx, func() error { return m.st.ReleaseMeta(dctx, repo.ID, tok, err) }); rerr != nil && !errors.Is(rerr, store.ErrFenced) {
+		// Immediate requeue: the (endpoint,'api') cooldown gate is what holds
+		// the row back, not a per-repo backoff.
+		if rerr := m.storeCall(dctx, func() error { return m.st.ReleaseMeta(dctx, repo.ID, tok, time.Time{}, err) }); rerr != nil && !errors.Is(rerr, store.ErrFenced) {
 			log.Warn("release meta failed", "err", rerr)
 		}
 	case errors.As(err, &nf), errors.As(err, &g), errors.As(err, &a), errors.As(err, &nr):
@@ -308,7 +325,10 @@ func (m *Manager) handleMetaError(ctx context.Context, repo *store.Repo, tok sto
 			m.recordError(err)
 			return
 		}
-		if rerr := m.storeCall(dctx, func() error { return m.st.ReleaseMeta(dctx, repo.ID, tok, err) }); rerr != nil && !errors.Is(rerr, store.ErrFenced) {
+		// Durable exponential backoff so a persistent 5xx does not hot-loop
+		// lease→fail→re-lease: the row is hidden until available_at elapses.
+		availableAt := m.nowFn().Add(cooldownBackoff(repo.Retries))
+		if rerr := m.storeCall(dctx, func() error { return m.st.ReleaseMeta(dctx, repo.ID, tok, availableAt, err) }); rerr != nil && !errors.Is(rerr, store.ErrFenced) {
 			log.Warn("release meta failed", "err", rerr)
 		}
 	}
@@ -355,7 +375,7 @@ func (m *Manager) destFor(j *store.Job, repo *store.Repo, repoPath string) (stri
 		repoName = repo.Name
 		repoType = repo.Type
 	}
-	base := filepath.Join(j.DestDir, repoCacheDirName(repoType, repoName), "snapshots", sha)
+	base := filepath.Join(j.DestDir, cache.ModelDirName(repoType, repoName), "snapshots", sha)
 	return cache.SafeJoin(base, repoPath)
 }
 

@@ -73,6 +73,25 @@ func (m *Manager) downloadOrchestrator(ctx context.Context) {
 			if isActive {
 				continue
 			}
+			// Warm-cache reuse (degenerate salvage): the file's verified
+			// blob is already in the content-addressed store — a prior run over
+			// the same cache, or the same content under another repo/revision.
+			// Skip download, verify and copy; mark it cached against the
+			// existing blob and let install link it out. This is what makes a
+			// fresh state DB over a warm cache not redownload.
+			if path, ok := m.cfg.Cache.HasBlob(blobID(&files[i])); ok {
+				if err := m.storeCall(ctx, func() error {
+					return m.st.MarkCachedFromBlob(ctx, files[i].ID, path)
+				}); err != nil {
+					if !errors.Is(err, store.ErrFenced) {
+						m.log.Warn("mark cached from warm blob failed", "file_id", files[i].ID, "err", err)
+					}
+				} else {
+					m.log.Info("file reused from warm cache blob", "file_id", files[i].ID, "path", files[i].Path)
+					wake(m.wakeInstall)
+					continue
+				}
+			}
 			handled, deferred := m.salvageGate(ctx, &files[i])
 			if handled || deferred {
 				continue
@@ -203,7 +222,7 @@ func (m *Manager) startDownload(ctx context.Context, f *store.File) (launched bo
 	// skip the transfer entirely; the verifier decides.
 	if len(missing) == 0 {
 		if err := m.storeCall(ctx, func() error {
-			return m.st.TransitionFile(ctx, f.ID, tok, store.FileDownloading, store.FileDownloaded, nil)
+			return m.st.FinishDownloaded(ctx, f.ID, tok)
 		}); err != nil {
 			return false, fmt.Errorf("transition completed file: %w", err)
 		}
@@ -217,7 +236,7 @@ func (m *Manager) startDownload(ctx context.Context, f *store.File) (launched bo
 	if f.XetHash != "" && m.cfg.Xet != nil {
 		xs, err := m.prepareXetSource(ctx, f, repo)
 		if err != nil {
-			m.resetFileToQueued(ctx, f, tok, err)
+			m.handleXetPrepareError(ctx, f, tok, err)
 			return false, nil
 		}
 		src = xs
@@ -241,7 +260,7 @@ func (m *Manager) startDownload(ctx context.Context, f *store.File) (launched bo
 	}
 	blocks := chunkBlocks(f.ID, bounds, blockSize, startIdx+1)
 	if err := m.storeCall(ctx, func() error {
-		return m.st.ReplacePendingBlocks(ctx, f.ID, blocks)
+		return m.st.ReplacePendingBlocks(ctx, f.ID, tok, blocks)
 	}); err != nil {
 		m.resetFileToQueued(ctx, f, tok, err)
 		return false, nil
@@ -412,6 +431,29 @@ func (m *Manager) terminalFileError(ctx context.Context, f *store.File, tok stor
 	m.recordError(fmt.Errorf("sched: file %s: %w", f.Path, cause))
 }
 
+// handleXetPrepareError classifies a failed xet source preparation. Terminal
+// Hub/CAS auth, permission (gated repo), and not-found errors error the file
+// immediately — no retry (Hub 404/403/401 → terminal, CAS 401 refresh
+// failure → file error). Everything else is transient and requeues, but
+// bounded by the file's retry counter so a persistently-failing prepare can no
+// longer requeue forever (a 429 additionally parked the endpoint gate).
+func (m *Manager) handleXetPrepareError(ctx context.Context, f *store.File, tok store.LeaseToken, err error) {
+	var authErr *hfapi.AuthError
+	var gated *hfapi.GatedError
+	var notFound *hfapi.NotFoundError
+	var xetAuth *xet.AuthError
+	if errors.As(err, &authErr) || errors.As(err, &gated) || errors.As(err, &notFound) || errors.As(err, &xetAuth) {
+		m.terminalFileError(ctx, f, tok, err)
+		return
+	}
+	if n, ierr := m.st.IncrFileRetries(ctx, f.ID, tok); ierr == nil && n >= maxBlockRetries {
+		m.terminalFileError(ctx, f, tok,
+			fmt.Errorf("sched: xet prepare gave up after %d attempts: %w", n, err))
+		return
+	}
+	m.resetFileToQueued(ctx, f, tok, err)
+}
+
 // prepareXetSource resolves the refresh route (api-gated HEAD) and prepares
 // the xet reconstruction (cas-gated). Errors are requeue-worthy; a 429 sets
 // the matching (endpoint, kind) cooldown first.
@@ -426,7 +468,10 @@ func (m *Manager) prepareXetSource(ctx context.Context, f *store.File, repo *sto
 	if err != nil {
 		var rl *hfapi.RateLimitError
 		if errors.As(err, &rl) {
-			_ = m.setCooldown(ctx, repo.Endpoint, store.CooldownAPI, rl.RetryAfter, 0, "resolve 429")
+			// Thread the file's accumulated retry count as the backoff attempt
+			// so repeated 429s (no Retry-After) climb the 1s→5m ladder instead
+			// of pinning the first rung forever.
+			_ = m.setCooldown(ctx, repo.Endpoint, store.CooldownAPI, rl.RetryAfter, f.Retries, "resolve 429")
 		}
 		return nil, fmt.Errorf("sched: resolve xet %s: %w", f.Path, err)
 	}
@@ -443,7 +488,7 @@ func (m *Manager) prepareXetSource(ctx context.Context, f *store.File, repo *sto
 	if err := src.Prepare(ctx); err != nil {
 		var rl *hfapi.RateLimitError
 		if errors.As(err, &rl) {
-			_ = m.setCooldown(ctx, repo.Endpoint, store.CooldownCAS, rl.RetryAfter, 0, "cas 429")
+			_ = m.setCooldown(ctx, repo.Endpoint, store.CooldownCAS, rl.RetryAfter, f.Retries, "cas 429")
 		}
 		return nil, fmt.Errorf("sched: prepare xet %s: %w", f.Path, err)
 	}

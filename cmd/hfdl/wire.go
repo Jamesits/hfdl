@@ -24,6 +24,8 @@ import (
 	"github.com/jamesits/hfdl/pkg/tui"
 	"github.com/jamesits/hfdl/pkg/verify"
 	"github.com/jamesits/hfdl/pkg/xet"
+	"go.opentelemetry.io/otel/attribute"
+	"go.opentelemetry.io/otel/trace"
 )
 
 const (
@@ -38,11 +40,6 @@ const (
 	// fcioPoolMinCap/MaxCap clamp the --io-buffer auto pool: 64MiB..1GiB.
 	fcioPoolMinCap = 64 << 20
 	fcioPoolMaxCap = 1 << 30
-	// xetDefaultCacheCap is the default xet chunk cache LRU cap (10GiB).
-	xetDefaultCacheCap = 10 << 30
-	// apiBucketBurst is the HF API token-bucket burst for the --api-iops
-	// bucket.
-	apiBucketBurst = 10
 	// bandwidthMinBurst floors the bandwidth bucket burst when a limit is set.
 	bandwidthMinBurst = 8 << 20
 	// progressInterval is the non-TTY slog progress cadence.
@@ -109,17 +106,26 @@ func (a *wireApp) close(ctx context.Context) {
 	if a.handler != nil {
 		// Flush pending DB batches before OTel's log exporter shuts down.
 		hctx, hcancel := context.WithTimeout(flush, otelShutdownBudget)
-		_ = a.handler.Close(hctx)
+		err := a.handler.Close(hctx)
 		hcancel()
+		// The handler is now closed, so log the failure through the still-live
+		// text/ring legs (best-effort; the DB leg it guards is already gone).
+		if err != nil {
+			a.log.LogAttrs(flush, slog.LevelWarn, "log handler shutdown failed", slog.Any("err", err))
+		}
 	}
 	if a.prov != nil {
 		sctx, scancel := context.WithTimeout(flush, otelShutdownBudget)
-		_ = a.prov.Shutdown(sctx)
+		if err := a.prov.Shutdown(sctx); err != nil {
+			a.log.LogAttrs(flush, slog.LevelWarn, "telemetry shutdown failed", slog.Any("err", err))
+		}
 		scancel()
 	}
 	if a.store != nil {
 		sctx, scancel := context.WithTimeout(flush, otelShutdownBudget)
-		_ = a.store.Close(sctx)
+		if err := a.store.Close(sctx); err != nil {
+			a.log.LogAttrs(flush, slog.LevelWarn, "state store close failed", slog.Any("err", err))
+		}
 		scancel()
 	}
 }
@@ -152,10 +158,14 @@ func wireDownloadWith(ctx context.Context, p *downloadPlan, getenv func(string) 
 		return nil, err
 	}
 	app.store = st
-	handler.AttachDB(ctx, st)
+	// Prune retained logs BEFORE attaching the sink: AttachDB kicks off the
+	// async ring replay that inserts fresh rows, and pruning concurrently
+	// would race it (deleting rows replay just wrote, or vice versa). Prune
+	// old rows from prior runs first, then start the sink.
 	if err := st.PruneLogs(ctx, logRetainCount); err != nil {
 		log.LogAttrs(ctx, slog.LevelWarn, "log retention prune failed", slog.Any("err", err))
 	}
+	handler.AttachDB(ctx, st)
 
 	// 3. Telemetry (env-only; disabled → noop providers).
 	prov := otel.Noop()
@@ -192,6 +202,9 @@ func wireDownloadWith(ctx context.Context, p *downloadPlan, getenv func(string) 
 		poolCap = clamp(fcioPoolSlab*int64(p.limits.Conns)*2, fcioPoolMinCap, fcioPoolMaxCap)
 	}
 	pool := fcio.NewPool(fcioPoolSlab, poolCap)
+	// Back the engine's scratch reads with the same pool so ReadAll obeys the
+	// --io-buffer cap and back-pressures instead of self-allocating mappings.
+	engine.SetPool(pool)
 	volumes := fcio.NewVolumeSet()
 
 	// 7. Blob cache + verifier + downloader.
@@ -201,7 +214,7 @@ func wireDownloadWith(ctx context.Context, p *downloadPlan, getenv func(string) 
 		return nil, err
 	}
 	bandwidth := throttle.NewBucket(p.limits.MaxBandwidthBps, bandwidthBurst(p.limits.MaxBandwidthBps))
-	api := throttle.NewBucket(p.limits.APIIOPS, apiBucketBurst)
+	api := throttle.NewBucket(p.limits.APIIOPS, p.limits.APIBurst)
 	duty := throttle.NewDutyLimiter(p.limits.DiskActivePct, throttle.MediaUnknown)
 	// Probe the cache filesystem once: the duty derate depends on media class.
 	if fsType, err := fcio.ProbeFs(ctx, p.cacheDir); err != nil {
@@ -230,7 +243,7 @@ func wireDownloadWith(ctx context.Context, p *downloadPlan, getenv func(string) 
 
 	// 8. Xet client. CAS tokens are per Hub endpoint; endpoints beyond the
 	// first are payload mirrors, so the TokenSource closes over the primary.
-	xcfg := xet.Config{CacheMaxBytes: xetDefaultCacheCap}
+	xcfg := xet.Config{CacheMaxBytes: xet.CacheMaxBytesFromEnv(getenv)}
 	if v := getenv("HF_XET_ENDPOINT"); v != "" {
 		xcfg.CasURL = v
 	}
@@ -293,6 +306,28 @@ func (a *wireApp) submit(ctx context.Context, p *downloadPlan) error {
 }
 
 func (a *wireApp) runManager(ctx context.Context) error { return a.manager.Run(ctx) }
+
+// startRunSpan opens the hfdl.run root span on the injected cmd tracer:
+// every downstream sched.job / transfer.file span nests under it through ctx.
+// Attributes are the coarse invocation shape only (repo, revision, dest_mode,
+// limits) — no per-file detail. When telemetry is disabled the tracer is the
+// noop and this is allocation-cheap. Returns the span-carrying ctx and an end
+// func the caller defers.
+func startRunSpan(ctx context.Context, prov *otel.Providers, p *downloadPlan) (context.Context, func()) {
+	destMode := destModeCache
+	if p.cli.LocalDir != "" {
+		destMode = destModeLocalDir
+	}
+	ctx, span := prov.Tracer("hfdl.cmd").Start(ctx, "hfdl.run", trace.WithAttributes(
+		attribute.String("repo", p.ref.Repo),
+		attribute.String("revision", p.ref.Revision),
+		attribute.String("dest_mode", destMode),
+		attribute.Int("limits.max_workers", p.limits.MaxWorkers),
+		attribute.Int("limits.connections", p.limits.Conns),
+		attribute.Int64("limits.max_bandwidth_bps", p.limits.MaxBandwidthBps),
+	))
+	return ctx, func() { span.End() }
+}
 
 // runTUI drives the dashboard; the manager runs concurrently on the main
 // flow's goroutine (caller arranged it). Callbacks are the only side channel
@@ -476,10 +511,13 @@ func clamp(v, lo, hi int64) int64 {
 	return v
 }
 
-// stderrIsTTY reports whether fd 2 is a terminal (TUI gate; tests stub it).
-var stderrIsTTY = defaultStderrIsTTY
+// stdoutIsTTY reports whether stdout is a terminal (TUI gate; tests stub it).
+// The check is on stdout, not stderr, because bubbletea renders to stdout —
+// gating on stderr would launch the TUI even when stdout is redirected to a
+// file/pipe (corrupting the contract's final-path line).
+var stdoutIsTTY = defaultStdoutIsTTY
 
-func defaultStderrIsTTY() bool {
-	fi, err := os.Stderr.Stat()
+func defaultStdoutIsTTY() bool {
+	fi, err := os.Stdout.Stat()
 	return err == nil && fi.Mode()&os.ModeCharDevice != 0
 }

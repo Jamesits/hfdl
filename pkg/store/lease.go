@@ -53,8 +53,11 @@ func execGuarded(ctx context.Context, conn bun.IConn, op string, id int64, query
 	return nil
 }
 
-// RenewLease heartbeats lease_until on a row the caller still owns;
-// ErrFenced on lost ownership.
+// RenewLease heartbeats lease_until on a row the caller still owns; ErrFenced
+// on lost ownership. The guard requires the lease to still be live
+// (lease_until > now): a nominally-expired lease that Recover may already have
+// reclaimed (or is about to) cannot be resurrected — the heartbeat fails,
+// surfacing as ErrFenced, and the worker abandons its stale work.
 func (s *Store) RenewLease(ctx context.Context, kind LeaseKind, id int64, tok LeaseToken, until time.Time) error {
 	var table string
 	switch kind {
@@ -69,11 +72,12 @@ func (s *Store) RenewLease(ctx context.Context, kind LeaseKind, id int64, tok Le
 	default:
 		return fmt.Errorf("store: renew lease: unknown lease kind %q", string(kind))
 	}
+	now := utc(time.Now())
 	query := fmt.Sprintf(
-		"UPDATE %s SET lease_until = ?, updated_at = ? WHERE id = ? AND lease_token = ? AND lease_until IS NOT NULL",
+		"UPDATE %s SET lease_until = ?, updated_at = ? WHERE id = ? AND lease_token = ? AND lease_until IS NOT NULL AND lease_until > ?",
 		table)
 	return execGuarded(ctx, s.db, "renew lease", id, query,
-		utc(until), utc(time.Now()), id, string(tok))
+		utc(until), now, id, string(tok), now)
 }
 
 // claimOne runs a single-statement atomic claim (UPDATE ... WHERE id =

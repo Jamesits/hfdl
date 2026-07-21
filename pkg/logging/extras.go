@@ -11,7 +11,10 @@ import (
 // bridge). Because AttachSlog receives no context, the pre-attach ring
 // replay is deferred to the first Handle (or Close) that carries one;
 // replayMu makes exactly one goroutine perform it, and the replayed flag
-// keeps every later record strictly after the replayed ones.
+// keeps every later record strictly after the replayed ones. upTo is the
+// dedup horizon: replay delivers ring records with Seq <= upTo, and Handle
+// delivers live records only when Seq > upTo, so a record in flight during
+// attach is delivered exactly once (never both replayed and handled live).
 type extraSink struct {
 	h        slog.Handler
 	upTo     uint64 // ring Seq horizon captured at attach time

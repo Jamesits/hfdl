@@ -1,4 +1,4 @@
-//go:build !unix
+//go:build !unix && !windows
 
 package sched
 
@@ -9,8 +9,9 @@ import (
 	"strings"
 )
 
-// statfsFree on non-unix platforms reports unlimited space: the ENOSPC
-// pause still triggers on write errors, it just resumes on the next poll.
+// statfsFree on genuinely-unknown platforms (unix and Windows have real free-
+// space queries) reports unlimited space: the ENOSPC pause still triggers on
+// write errors, it just resumes on the next poll.
 func statfsFree(ctx context.Context, dir string) (int64, error) {
 	return math.MaxInt64, ctx.Err()
 }

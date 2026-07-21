@@ -29,6 +29,10 @@ const (
 // the destination directory so the final rename stays on one filesystem.
 const tmpPrefix = ".hfdl-tmp-"
 
+// tmpSuffix is appended to a target path for in-place atomic rewrites (refs)
+// where the temp must sit beside the target so the rename stays intra-dir.
+const tmpSuffix = ".tmp"
+
 // InstallRequest is one job_files row's worth of install work.
 type InstallRequest struct {
 	DestMode string // "cache" | "local-dir"
@@ -108,9 +112,9 @@ func (in *Installer) Install(ctx context.Context, r InstallRequest) (string, err
 	}
 }
 
-// modelDirName is huggingface_hub's per-repo cache directory name:
+// ModelDirName is huggingface_hub's per-repo cache directory name:
 // <type>s--org--name (repo-type prefix pluralized, slashes doubled).
-func modelDirName(repoType, repoName string) string {
+func ModelDirName(repoType, repoName string) string {
 	if repoType == "" {
 		repoType = "model"
 	}
@@ -122,7 +126,17 @@ func modelDirName(repoType, repoName string) string {
 // with the snapshot entry a relative symlink into blobs/, plus the empty
 // .locks/<type>s--org--name/<blob_id>.lock hf leaves per downloaded file.
 func (in *Installer) installCache(ctx context.Context, r InstallRequest, blobPath string) (string, error) {
-	dirName := modelDirName(r.RepoType, r.RepoName)
+	// ModelDirName is repo-controlled (org/name) and r.BlobID comes from tree
+	// metadata; both are joined into filesystem paths below, so gate them
+	// before any join. ModelDirName must be a single component; the blob id a
+	// bare hex digest.
+	dirName := ModelDirName(r.RepoType, r.RepoName)
+	if err := validateComponent(dirName); err != nil {
+		return "", err
+	}
+	if err := validateBlobID(r.BlobID); err != nil {
+		return "", err
+	}
 	base := filepath.Join(r.CacheDir, dirName)
 
 	lockDir := filepath.Join(r.CacheDir, ".locks", dirName)
@@ -137,18 +151,26 @@ func (in *Installer) installCache(ctx context.Context, r InstallRequest, blobPat
 	}
 
 	// refs/<revision> contains exactly the commit sha (no trailing newline,
-	// like huggingface_hub's ref_path.write_text(commit_hash)).
-	refPath, err := SafeJoin(filepath.Join(base, "refs"), r.Revision)
+	// like huggingface_hub's ref_path.write_text(commit_hash)). Written
+	// atomically — temp + fsync + rename + parent-dir fsync — so a crash
+	// never leaves a torn ref (a truncate-in-place could).
+	refPath, err := SafeJoinContent(filepath.Join(base, "refs"), r.Revision)
 	if err != nil {
 		return "", err
 	}
-	if err := os.MkdirAll(filepath.Dir(refPath), 0o755); err != nil {
+	refDir := filepath.Dir(refPath)
+	if err := os.MkdirAll(refDir, 0o755); err != nil {
 		return "", fmt.Errorf("cache: create refs dir: %w", err)
 	}
-	if err := writeFileSync(refPath, []byte(r.CommitSHA), 0o644); err != nil {
+	refTmp := refPath + tmpSuffix
+	if err := writeFileSync(refTmp, []byte(r.CommitSHA), 0o644); err != nil {
 		return "", err
 	}
-	if err := in.fsyncDirFn(filepath.Dir(refPath)); err != nil {
+	if err := replaceFile(refTmp, refPath); err != nil {
+		_ = os.Remove(refTmp)
+		return "", fmt.Errorf("cache: rename %s → %s: %w", refTmp, refPath, err)
+	}
+	if err := in.fsyncDirFn(refDir); err != nil {
 		return "", err
 	}
 
@@ -198,7 +220,7 @@ func (in *Installer) installCache(ctx context.Context, r InstallRequest, blobPat
 // fsync makes the step durable, then the huggingface_hub metadata stamp is
 // written for hf parity.
 func (in *Installer) installLocalDir(ctx context.Context, r InstallRequest, blobPath string) (string, error) {
-	dest, err := SafeJoin(r.DestDir, r.RepoPath)
+	dest, err := SafeJoinContent(r.DestDir, r.RepoPath)
 	if err != nil {
 		return "", err
 	}
@@ -276,6 +298,15 @@ func (in *Installer) installCopy(ctx context.Context, src, final string, size in
 	if err := in.copyFn(ctx, src, tmp, size, false); err != nil {
 		_ = os.Remove(tmp)
 		err = fmt.Errorf("cache: install copy %s: %w", final, err)
+		span.RecordError(err)
+		span.SetStatus(codes.Error, err.Error())
+		return err
+	}
+	// Fsync the temp before the rename rather than trusting the copy callback
+	// to have fsynced: the callback is a seam and an injected/alternate copy
+	// may not fsync, so the durability barrier is owned here.
+	if err := syncFile(tmp); err != nil {
+		_ = os.Remove(tmp)
 		span.RecordError(err)
 		span.SetStatus(codes.Error, err.Error())
 		return err
@@ -409,18 +440,6 @@ func sameBlob(final, relTarget, blobPath string) (bool, error) {
 		return false, err
 	}
 	return os.SameFile(bi, fi2), nil
-}
-
-// replaceFile renames src onto dst atomically, removing a stale dst first
-// where the platform requires it (Windows rename refuses existing targets).
-func replaceFile(src, dst string) error {
-	if err := os.Rename(src, dst); err != nil {
-		if rerr := os.Remove(dst); rerr != nil && !errors.Is(rerr, os.ErrNotExist) {
-			return err
-		}
-		return os.Rename(src, dst)
-	}
-	return nil
 }
 
 // volumeAttrs records src/dst volume ids on an fcio.copy span.

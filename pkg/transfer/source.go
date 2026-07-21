@@ -76,10 +76,16 @@ const (
 
 // AttemptError is a retriable single-attempt failure; the worker requeues
 // the block with backoff and (for most kinds) penalizes the upstream EMA.
+// StatusCode and RetryAfter are populated for FailStatus responses (429/503/
+// 5xx) so the scheduler can apply a typed, Retry-After-aware upstream cooldown
+// instead of string-matching the error text. RetryAfter is 0 when the response
+// carried no usable Retry-After header.
 type AttemptError struct {
-	Upstream string
-	Kind     FailKind
-	Err      error
+	Upstream   string
+	Kind       FailKind
+	StatusCode int
+	RetryAfter time.Duration
+	Err        error
 }
 
 func (e *AttemptError) Error() string {
@@ -245,9 +251,14 @@ func upstreamOf(rc io.ReadCloser) string {
 // is a typed error the worker classifies.
 func (s *httpSource) Open(ctx context.Context, off, length int64) (io.ReadCloser, error) {
 	if s.allRangeless() {
-		// Single-stream fallback: ranged scheduling is abandoned for this
-		// file; the only meaningful request is the whole object.
-		return s.openWhole(ctx)
+		// Every upstream answered 200 to a ranged request: ranged scheduling
+		// is abandoned. Fail so the worker requeues the block and the run
+		// switches to the single-stream fallback (openWhole, driven by
+		// runFallback). A ranged worker must NEVER receive a whole-file
+		// stream here — it would write file-offset-0 bytes at the block
+		// offset and record bogus slabs before the length mismatch surfaces.
+		// The whole-file GET is reachable only through openWhole.
+		return nil, errAllRangeless
 	}
 	up, err := s.pick(time.Now())
 	if err != nil {
@@ -291,13 +302,17 @@ func (s *httpSource) Open(ctx context.Context, off, length int64) (io.ReadCloser
 		cancel()
 		return nil, &rangeNotSatisfiableError{upstream: up.Endpoint}
 	case http.StatusTooManyRequests, http.StatusServiceUnavailable:
+		ra := parseRetryAfter(resp.Header.Get("Retry-After"))
+		st := resp.StatusCode
 		_ = resp.Body.Close()
 		cancel()
 		s.setCooldown(up.Endpoint, time.Now().Add(upstreamCooldownTTL))
 		return nil, &AttemptError{
-			Upstream: up.Endpoint,
-			Kind:     FailStatus,
-			Err:      fmt.Errorf("HTTP %d (upstream cooled down)", resp.StatusCode),
+			Upstream:   up.Endpoint,
+			Kind:       FailStatus,
+			StatusCode: st,
+			RetryAfter: ra,
+			Err:        fmt.Errorf("HTTP %d (upstream cooled down)", st),
 		}
 	case http.StatusUnauthorized, http.StatusForbidden, http.StatusNotFound:
 		_ = resp.Body.Close()
@@ -308,9 +323,10 @@ func (s *httpSource) Open(ctx context.Context, off, length int64) (io.ReadCloser
 		cancel()
 		if resp.StatusCode >= 500 {
 			return nil, &AttemptError{
-				Upstream: up.Endpoint,
-				Kind:     FailStatus,
-				Err:      fmt.Errorf("HTTP %d", resp.StatusCode),
+				Upstream:   up.Endpoint,
+				Kind:       FailStatus,
+				StatusCode: resp.StatusCode,
+				Err:        fmt.Errorf("HTTP %d", resp.StatusCode),
 			}
 		}
 		return nil, &TerminalHTTPError{Upstream: up.Endpoint, StatusCode: resp.StatusCode}
@@ -358,7 +374,11 @@ func (s *httpSource) openWhole(ctx context.Context) (io.ReadCloser, error) {
 		}
 		return nil, &TerminalHTTPError{Upstream: up.Endpoint, StatusCode: st}
 	}
-	if err := s.checkIdentity(up.Endpoint, etagOf(resp)); err != nil {
+	// Fallback whole-file GET: a plain 200 may legitimately lack a strong
+	// validator, so identity is checked opportunistically (no requireValidator)
+	// — a present ETag must still match the blob/pin, but a missing one does
+	// not fail the last-resort fetch.
+	if err := s.checkIdentity(up.Endpoint, etagOf(resp), false); err != nil {
 		_ = resp.Body.Close()
 		cancel()
 		return nil, err
@@ -417,7 +437,7 @@ func (s *httpSource) validate206(resp *http.Response, upstream string, off, leng
 	if resp.ContentLength >= 0 && resp.ContentLength != length {
 		return fail("Content-Length %d != requested %d", resp.ContentLength, length)
 	}
-	if err := s.checkIdentity(upstream, etagOf(resp)); err != nil {
+	if err := s.checkIdentity(upstream, etagOf(resp), true); err != nil {
 		return err
 	}
 	return nil
@@ -443,6 +463,29 @@ func parseContentRange(v string) (start, end, total int64, ok bool) {
 	return start, end, total, true
 }
 
+// parseRetryAfter parses a Retry-After header: delta-seconds or an HTTP-date.
+// Returns 0 when absent or unparseable. Kept local (not hfapi.ParseRetryAfter)
+// so the transfer layer stays independent of hfapi — transfer builds its own
+// resolve URLs and never imports the Hub API client, by design.
+func parseRetryAfter(v string) time.Duration {
+	v = strings.TrimSpace(v)
+	if v == "" {
+		return 0
+	}
+	if secs, err := strconv.Atoi(v); err == nil {
+		if secs < 0 {
+			return 0
+		}
+		return time.Duration(secs) * time.Second
+	}
+	if t, err := http.ParseTime(v); err == nil {
+		if d := time.Until(t); d > 0 {
+			return d
+		}
+	}
+	return 0
+}
+
 // etagOf extracts the object identity: X-Linked-Etag wins over ETag (HF
 // resolve responses surface the LFS oid there), weak validators and quotes
 // stripped.
@@ -455,28 +498,48 @@ func etagOf(resp *http.Response) string {
 	return strings.Trim(v, `"`)
 }
 
-// checkIdentity enforces the (upstream,file) identity pin. A mirror serving
-// content inconsistent with BlobID — or with its own pinned identity — is
-// excluded for this file and the attempt fails as a validation error.
-func (s *httpSource) checkIdentity(upstream, etag string) error {
+// checkIdentity enforces the (upstream,file) identity pin. requireValidator is
+// true for ranged 206 responses, which must prove identity: the plan requires
+// every ranged response to carry a validator and the first to pin it, so a
+// missing ETag/X-Linked-Etag is itself a validation failure (a mirror that
+// drops the validator can no longer be trusted to be serving the same object).
+// It is false for the last-resort whole-file fallback, where a present
+// validator is still checked but a missing one is tolerated. A mirror serving
+// content inconsistent with BlobID — or with its own pin — is excluded for
+// this file.
+func (s *httpSource) checkIdentity(upstream, etag string, requireValidator bool) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	if pin, ok := s.pins[upstream]; ok {
-		if etag != "" && pin != "" && !strings.EqualFold(etag, pin) {
+	if pin, ok := s.pins[upstream]; ok && pin != "" {
+		if etag == "" {
+			if requireValidator {
+				s.excluded[upstream] = true
+				return &AttemptError{Upstream: upstream, Kind: FailValidation,
+					Err: fmt.Errorf("ranged response dropped its validator; cannot confirm pinned identity %q", pin)}
+			}
+			return nil
+		}
+		if !strings.EqualFold(etag, pin) {
 			s.excluded[upstream] = true
 			return &AttemptError{Upstream: upstream, Kind: FailValidation,
 				Err: fmt.Errorf("ETag %q no longer matches pinned identity %q", etag, pin)}
 		}
 		return nil
 	}
-	if s.blobID != "" && etag != "" && !strings.EqualFold(etag, s.blobID) {
+	// No pin yet: this response must establish identity.
+	if etag == "" {
+		if requireValidator {
+			return &AttemptError{Upstream: upstream, Kind: FailValidation,
+				Err: errors.New("ranged response carried no ETag/X-Linked-Etag to prove identity")}
+		}
+		return nil
+	}
+	if s.blobID != "" && !strings.EqualFold(etag, s.blobID) {
 		s.excluded[upstream] = true
 		return &AttemptError{Upstream: upstream, Kind: FailValidation,
 			Err: fmt.Errorf("ETag %q inconsistent with blob %q", etag, s.blobID)}
 	}
-	if etag != "" {
-		s.pins[upstream] = etag
-	}
+	s.pins[upstream] = etag
 	return nil
 }
 
@@ -507,6 +570,18 @@ func (s *httpSource) allRangeless() bool {
 func (s *httpSource) setCooldown(endpoint string, until time.Time) {
 	s.mu.Lock()
 	s.cooldown[endpoint] = until
+	s.mu.Unlock()
+}
+
+// blacklist temporarily parks an upstream after a stall or transport/
+// validation error so the next block for this file goes elsewhere.
+// It never shortens a longer existing park (e.g. a 429 30s cooldown).
+func (s *httpSource) blacklist(endpoint string) {
+	until := time.Now().Add(upstreamBlacklistTTL)
+	s.mu.Lock()
+	if cur, ok := s.cooldown[endpoint]; !ok || until.After(cur) {
+		s.cooldown[endpoint] = until
+	}
 	s.mu.Unlock()
 }
 

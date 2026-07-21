@@ -257,10 +257,10 @@ func TestReleaseMeta(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	if err := s.ReleaseMeta(ctx, repo.ID, "01JWRONGTOKEN000000000000", nil); !errors.Is(err, ErrFenced) {
+	if err := s.ReleaseMeta(ctx, repo.ID, "01JWRONGTOKEN000000000000", time.Time{}, nil); !errors.Is(err, ErrFenced) {
 		t.Fatalf("ReleaseMeta wrong token err = %v, want ErrFenced", err)
 	}
-	if err := s.ReleaseMeta(ctx, repo.ID, tok, errors.New("429 backoff")); err != nil {
+	if err := s.ReleaseMeta(ctx, repo.ID, tok, time.Time{}, errors.New("429 backoff")); err != nil {
 		t.Fatalf("ReleaseMeta: %v", err)
 	}
 	var st, lastErr string

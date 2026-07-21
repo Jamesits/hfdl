@@ -76,6 +76,12 @@ type Engine struct {
 
 	vols sync.Map // "volcaps:<dev>" -> *volCaps (linux direct tier)
 
+	// pool sources ReadAll scratch when set, so verify/copy reads back-pressure
+	// against the same --io-buffer budget as writes. nil ⇒ ReadAll falls back
+	// to private page-aligned scratch. Injected via SetPool (cmd wires the
+	// engine and pool it created together); the engine never builds its own.
+	pool *Pool
+
 	// fallocateFn overrides the fallocate syscall used by Open; nil uses the
 	// OS call. Test seam for the ENOSYS degradation to the no-preallocation
 	// tier.
@@ -86,6 +92,11 @@ type Engine struct {
 func NewEngine(log *slog.Logger, caps CapsCache, mode IOTier) *Engine {
 	return &Engine{log: log, caps: caps, mode: mode}
 }
+
+// SetPool injects the shared buffer pool used to source ReadAll scratch, so
+// large verify/copy read passes obey the pool cap and back-pressure instead
+// of allocating private mappings. Wired once at startup, before any Open.
+func (e *Engine) SetPool(p *Pool) { e.pool = p }
 
 func (e *Engine) logDebug(msg string, args ...any) {
 	if e.log != nil {
@@ -131,11 +142,14 @@ type readOp struct {
 	direct  bool
 }
 
-// ReadAll streams f from offset 0 to EOF through a readahead pipeline: up to
-// depthForFS(f media class) reads in flight, fn invoked strictly in offset
+// ReadAll streams f from offset 0 to EOF, invoking fn strictly in offset
 // order. fn must consume p synchronously — the buffer is reused after fn
-// returns. Buffers are self-allocated (page-aligned scratch, so the direct
-// tier is safe) because Pool ownership stays with the caller.
+// returns. Only the direct tier runs the application-level readahead pipeline
+// (it bypasses kernel readahead); the fadvise/plain tiers run a simple
+// sequential loop, since FADV_SEQUENTIAL already primes the kernel readahead
+// window. Scratch is sourced from the engine's Pool when one is injected (so
+// a 40GiB hash pass obeys the --io-buffer cap and back-pressure), else from
+// private page-aligned scratch.
 func (e *Engine) ReadAll(ctx context.Context, f *File, fn func(p []byte, off int64) error) error {
 	if err := ctx.Err(); err != nil {
 		return err
@@ -149,15 +163,85 @@ func (e *Engine) ReadAll(ctx context.Context, f *File, fn func(p []byte, off int
 		return nil
 	}
 	f.declareSequential()
-	depth := depthForFS(f.fsType)
+	if f.tier == tierDirect {
+		return e.readAllDirect(ctx, f, size, fn)
+	}
+	return e.readAllSequential(ctx, f, size, fn)
+}
+
+// readAllSequential is the fadvise/plain path: one buffer in flight, read in
+// order via the buffered fd, and (fadvise tier) a trailing DONTNEED behind
+// the consumed offset so the read pass does not pollute the page cache.
+func (e *Engine) readAllSequential(ctx context.Context, f *File, size int64, fn func(p []byte, off int64) error) error {
 	chunk := readChunkSize
-	direct := f.tier == tierDirect
-	var bodyEnd int64
-	if direct {
-		// Aligned body goes through the O_DIRECT fd; the unaligned EOF tail
-		// is read through the buffered fd.
-		chunk = (chunk + f.align - 1) / f.align * f.align
-		bodyEnd = size / f.align * f.align
+	var buf []byte
+	if e.pool != nil {
+		b, err := e.pool.Get(ctx)
+		if err != nil {
+			return err
+		}
+		defer b.Release()
+		if e.pool.SlabSize() < chunk {
+			chunk = e.pool.SlabSize()
+		}
+		b.SetLen(int(chunk))
+		buf = b.Data()
+	} else {
+		buf = make([]byte, chunk)
+	}
+	for off := int64(0); off < size; {
+		if err := ctx.Err(); err != nil {
+			return err
+		}
+		length := chunk
+		if rem := size - off; rem < length {
+			length = rem
+		}
+		n, err := f.readChunk(buf[:length], off, false)
+		if err != nil {
+			return fmt.Errorf("fcio: read %s @%d: %w", f.path, off, err)
+		}
+		if err := fn(buf[:n], off); err != nil {
+			return err
+		}
+		// Evict what we just consumed (no-op off the fadvise tier), keeping a
+		// large sequential read pass from thrashing the working set.
+		f.DontNeed(off, int64(n))
+		off += int64(n)
+	}
+	f.maxInflight.Store(1)
+	return nil
+}
+
+// readAllDirect is the direct-tier readahead pipeline: up to
+// depthForFS(media) reads in flight, delivered in offset order. The aligned
+// body is read through the O_DIRECT fd, the unaligned EOF tail through the
+// buffered fd.
+func (e *Engine) readAllDirect(ctx context.Context, f *File, size int64, fn func(p []byte, off int64) error) error {
+	depth := depthForFS(f.fsType)
+	chunk := (readChunkSize + f.align - 1) / f.align * f.align
+	bodyEnd := size / f.align * f.align
+	if e.pool != nil {
+		// Bound in-flight buffers by the pool so the pipeline can never hold
+		// more slabs than exist (self-deadlock), and keep a chunk within one
+		// slab while staying alignment-multiple.
+		if s := e.pool.Slabs(); depth > s {
+			depth = s
+		}
+		if slab := e.pool.SlabSize(); chunk > slab {
+			chunk = slab / f.align * f.align
+		}
+	}
+	getScratch := func(n int) ([]byte, func(), error) {
+		if e.pool != nil {
+			b, err := e.pool.Get(ctx)
+			if err != nil {
+				return nil, nil, err
+			}
+			b.SetLen(n)
+			return b.Data(), b.Release, nil
+		}
+		return mmapScratch(n)
 	}
 	var inflight []*readOp
 	maxInflight := 0
@@ -179,8 +263,8 @@ func (e *Engine) ReadAll(ctx context.Context, f *File, fn func(p []byte, off int
 			if rem := size - off; rem < length {
 				length = rem
 			}
-			useDirect := direct && off+length <= bodyEnd
-			buf, release, aerr := mmapScratch(int(length))
+			useDirect := off+length <= bodyEnd
+			buf, release, aerr := getScratch(int(length))
 			if aerr != nil {
 				drain()
 				return fmt.Errorf("fcio: read scratch: %w", aerr)

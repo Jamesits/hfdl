@@ -82,21 +82,22 @@ func (s *Store) UpdateUpstream(ctx context.Context, endpoint string, emaBps floa
 		errs = 1
 	}
 	now := utc(time.Now())
-	res, err := s.db.ExecContext(ctx,
-		"UPDATE upstreams SET ema_bps = ?, successes = successes + ?, errors = errors + ?, "+
-			"cooldown_until = COALESCE(?, cooldown_until), blacklist_until = COALESCE(?, blacklist_until), updated_at = ? "+
-			"WHERE endpoint = ?",
-		emaBps, succ, errs, cooldownUntil, blacklistUntil, now, endpoint)
-	if err != nil {
+	// One atomic upsert: the old update-then-insert raced (two concurrent
+	// callers on a new endpoint both saw 0 updated rows and both inserted,
+	// tripping the UNIQUE(endpoint) constraint). ON CONFLICT accumulates the
+	// success/error tallies against the existing row.
+	if _, err := s.db.ExecContext(ctx,
+		"INSERT INTO upstreams (endpoint, ema_bps, successes, errors, cooldown_until, blacklist_until, updated_at) "+
+			"VALUES (?, ?, ?, ?, ?, ?, ?) "+
+			"ON CONFLICT (endpoint) DO UPDATE SET "+
+			"ema_bps = excluded.ema_bps, "+
+			"successes = upstreams.successes + excluded.successes, "+
+			"errors = upstreams.errors + excluded.errors, "+
+			"cooldown_until = COALESCE(excluded.cooldown_until, upstreams.cooldown_until), "+
+			"blacklist_until = COALESCE(excluded.blacklist_until, upstreams.blacklist_until), "+
+			"updated_at = excluded.updated_at",
+		endpoint, emaBps, succ, errs, cooldownUntil, blacklistUntil, now); err != nil {
 		return fmt.Errorf("store: update upstream %s: %w", endpoint, err)
-	}
-	if n, _ := res.RowsAffected(); n == 0 {
-		if _, err := s.db.ExecContext(ctx,
-			"INSERT INTO upstreams (endpoint, ema_bps, successes, errors, cooldown_until, blacklist_until, updated_at) "+
-				"VALUES (?, ?, ?, ?, ?, ?, ?)",
-			endpoint, emaBps, succ, errs, cooldownUntil, blacklistUntil, now); err != nil {
-			return fmt.Errorf("store: update upstream %s: %w", endpoint, err)
-		}
 	}
 	return nil
 }

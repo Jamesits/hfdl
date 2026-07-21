@@ -10,15 +10,17 @@ type FileStat struct {
 	Done      int64
 	Total     int64
 	Rate      float64  // windowed B/s
+	EMABps    float64  // per-file EMA rate estimate (α=0.2)
 	Conns     int      // live connections on this file
 	Upstreams []string // upstreams with at least one live connection, sorted
 }
 
 // UpstreamStat is a point-in-time copy of one upstream's counters.
 type UpstreamStat struct {
-	Bytes  int64
-	EMABps float64 // EMA rate estimate (α=0.2)
-	Conns  int     // live connections
+	Bytes        int64
+	EMABps       float64 // EMA rate estimate (α=0.2)
+	WindowedRate float64 // windowed B/s over the 10s ring
+	Conns        int     // live connections
 }
 
 // Snapshot is a deep copy of the registry for the TUI (4Hz poll) and OTel
@@ -27,6 +29,7 @@ type Snapshot struct {
 	TotalNetwork  int64
 	TotalSalvaged int64
 	GlobalRate    float64 // windowed B/s over the 10s ring
+	GlobalEMABps  float64 // global EMA rate estimate (α=0.2)
 	Files         map[int64]FileStat
 	Upstreams     map[string]UpstreamStat
 	Conns         int
@@ -44,6 +47,7 @@ func (r *Registry) Snapshot() *Snapshot {
 		TotalNetwork:  r.totalNetwork.Load(),
 		TotalSalvaged: r.totalSalvaged.Load(),
 		GlobalRate:    r.globalRing.Rate(now),
+		GlobalEMABps:  math.Float64frombits(r.globalEMA.Load()),
 		Files:         make(map[int64]FileStat),
 		Upstreams:     make(map[string]UpstreamStat),
 		Conns:         int(r.conns.Load()),
@@ -64,6 +68,7 @@ func (r *Registry) Snapshot() *Snapshot {
 			Done:      f.done.Load(),
 			Total:     f.total.Load(),
 			Rate:      f.ring.Rate(now),
+			EMABps:    math.Float64frombits(f.ema.Load()),
 			Conns:     int(f.conns.Load()),
 			Upstreams: ups,
 		}
@@ -73,9 +78,10 @@ func (r *Registry) Snapshot() *Snapshot {
 	r.upsMu.RLock()
 	for name, u := range r.upstreams {
 		s.Upstreams[name] = UpstreamStat{
-			Bytes:  u.bytes.Load(),
-			EMABps: math.Float64frombits(u.ema.Load()),
-			Conns:  int(u.conns.Load()),
+			Bytes:        u.bytes.Load(),
+			EMABps:       math.Float64frombits(u.ema.Load()),
+			WindowedRate: u.ring.Rate(now),
+			Conns:        int(u.conns.Load()),
 		}
 	}
 	r.upsMu.RUnlock()

@@ -23,6 +23,16 @@ func (t *intervalTracker) add(start, end int64) {
 	t.mu.Unlock()
 }
 
+// reset clears the set to empty for a fresh size. Used on entering the
+// single-stream fallback: the ranged-mode partial intervals are not resumable
+// there (no mid-file resume), so a later checkpoint must not persist them.
+func (t *intervalTracker) reset(size int64) {
+	t.mu.Lock()
+	t.set = IntervalSet{size: size}
+	t.changes++
+	t.mu.Unlock()
+}
+
 func (t *intervalTracker) snapshot() (*IntervalSet, uint64) {
 	t.mu.Lock()
 	defer t.mu.Unlock()

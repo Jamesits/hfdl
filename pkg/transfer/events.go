@@ -46,11 +46,16 @@ type Event struct {
 	Err             error
 }
 
-// emit delivers an event, blocking while a live consumer drains but never
-// past run cancellation — a stalled consumer must not wedge workers.
-func (d *Downloader) emit(ctx context.Context, ev Event) {
+// emit delivers an event without ever blocking a worker. Events are
+// best-effort telemetry; most emits use the detached,
+// never-cancelled ctx (done/requeue/checkpoint), so a blocking send against a
+// gone or wedged consumer with a full 1024-buffer would deadlock every worker.
+// On a full buffer we drop and count instead. ctx is retained for call-site
+// symmetry but no longer gates delivery.
+func (d *Downloader) emit(_ context.Context, ev Event) {
 	select {
 	case d.events <- ev:
-	case <-ctx.Done():
+	default:
+		d.droppedEvents.Add(1)
 	}
 }

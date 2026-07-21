@@ -32,6 +32,23 @@ func (t ioTier) String() string {
 	return "invalid"
 }
 
+// ErrFallocateUnsupported is the honest verdict returned by File.Fallocate on
+// platforms with no fallocate-equivalent that converts holes to allocated
+// unwritten extents (Windows, macOS, and truly-unknown platforms). It routes
+// the de-sparse caller to the SEEK_HOLE/QUERY_ALLOCATED_RANGES zero-fill walk
+// instead of silently reporting density that was never established (the P0
+// invariant violation the plain stub used to commit). Recognized as a tier-B
+// trigger by pkg/verify's fallocateUnsupported.
+var ErrFallocateUnsupported = errors.New("fcio: fallocate unsupported on this platform")
+
+// Densify finalizes a just-de-sparsed file into an ordinary, attribute-clean
+// dense file. It is a no-op on platforms that carry no sparse attribute
+// (Linux/macOS: a fallocate or a SEEK_HOLE walk already leaves the blob dense);
+// on Windows it clears the FILE_ATTRIBUTE_SPARSE_FILE marker (FSCTL_SET_SPARSE
+// SetSparse=FALSE) and fsyncs, so the finished blob is handed to install and
+// downstream software as a plain non-sparse file.
+func (f *File) Densify() error { return f.clearSparse() }
+
 // File is one open cache/blob file on its resolved tier.
 type File struct {
 	path string

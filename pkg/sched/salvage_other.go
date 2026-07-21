@@ -1,9 +1,9 @@
-//go:build !unix
+//go:build !unix && !windows
 
 package sched
 
 import "os"
 
-// devIno without unix stat: size+mtime still invalidate correctly on
-// platforms that cannot expose dev/ino portably.
-func devIno(info os.FileInfo) (dev, ino uint64) { return 0, 0 }
+// devIno on genuinely-unknown platforms (unix and Windows expose real dev/ino):
+// size+mtime still invalidate correctly where dev/ino cannot be obtained.
+func devIno(_ string, info os.FileInfo) (dev, ino uint64) { return 0, 0 }

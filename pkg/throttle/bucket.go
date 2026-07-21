@@ -102,9 +102,12 @@ func (b *Bucket) Wait(ctx context.Context, n int64) error {
 		if b.tokens >= float64(take) {
 			b.tokens -= float64(take)
 			remaining -= take
+			// Record each installment as it is consumed, not only on full
+			// completion: a Wait cancelled mid-loop has already spent these
+			// tokens, so they must show up in the windowed rate (and not leak).
+			b.ring.Add(now, 0, take)
 			b.mu.Unlock()
 			if remaining == 0 {
-				b.ring.Add(now, 0, n)
 				return nil
 			}
 			continue
@@ -149,8 +152,17 @@ func (b *Bucket) SetRate(perSec, burst int64) {
 	b.refillLocked(b.clock.Now(), b.rate.Load())
 	b.rate.Store(perSec)
 	b.burst.Store(burst)
-	if perSec > 0 && b.tokens > float64(burst) {
-		b.tokens = float64(burst)
+	if perSec > 0 {
+		// Clamp tokens into [0, burst]. Switching from unlimited (where a
+		// bucket built with burst < 1 can hold zero or negative tokens) to a
+		// limited rate must not leave a negative balance that spuriously
+		// blocks the next Wait, nor a balance above the new burst.
+		if b.tokens > float64(burst) {
+			b.tokens = float64(burst)
+		}
+		if b.tokens < 0 {
+			b.tokens = 0
+		}
 	}
 	close(b.wake)
 	b.wake = make(chan struct{})

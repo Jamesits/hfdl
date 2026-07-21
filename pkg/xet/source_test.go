@@ -415,7 +415,10 @@ func TestBoundariesSnapping(t *testing.T) {
 		}
 	}
 
-	// Partial missing interval mid-term still snaps its end.
+	// Partial missing interval mid-term snaps BOTH edges to term boundaries:
+	// the leading edge of [50,300) drops down to the enclosing term's start
+	// (term [0,100) → 0); the trailing edge stays at 300 (m.End) with interior
+	// splits landing on the term edges.
 	out = s.Boundaries(intervals(50, 300), 128)
 	for _, iv := range out {
 		for _, e := range []int64{100, 250} {
@@ -424,7 +427,7 @@ func TestBoundariesSnapping(t *testing.T) {
 			}
 		}
 	}
-	if out[0].Start != 50 || out[len(out)-1].End != 300 {
+	if out[0].Start != 0 || out[len(out)-1].End != 300 {
 		t.Fatalf("coverage broken: %v", out)
 	}
 }
@@ -435,5 +438,61 @@ func TestBoundariesWithoutRecon(t *testing.T) {
 	out := s.Boundaries(in, 4)
 	if len(out) != 1 || out[0] != in[0] {
 		t.Fatalf("unprepared Boundaries should pass through, got %v", out)
+	}
+}
+
+func TestNormalizeRejectsMalformed(t *testing.T) {
+	var de *DataError
+	// Empty/inverted chunk range.
+	if _, err := normalizeV2(&reconstructionV2JSON{
+		Terms: []termJSON{{Hash: "aa", UnpackedLength: 10, Range: chunkRangeJSON{Start: 3, End: 3}}},
+	}, 0); !errors.As(err, &de) {
+		t.Fatalf("empty chunk range: want DataError, got %v", err)
+	}
+	// Zero unpacked_length.
+	if _, err := normalizeV2(&reconstructionV2JSON{
+		Terms: []termJSON{{Hash: "aa", UnpackedLength: 0, Range: chunkRangeJSON{Start: 0, End: 2}}},
+	}, 0); !errors.As(err, &de) {
+		t.Fatalf("zero unpacked_length: want DataError, got %v", err)
+	}
+	// Fetch info that cannot cover the term's chunk range.
+	if _, err := normalizeV2(&reconstructionV2JSON{
+		Terms: []termJSON{{Hash: "bb", UnpackedLength: 10, Range: chunkRangeJSON{Start: 0, End: 2}}},
+		Xorbs: map[string][]multiRangeFetchJSON{},
+	}, 0); !errors.As(err, &de) {
+		t.Fatalf("uncovered term: want DataError, got %v", err)
+	}
+}
+
+func TestGetSignedRangeRejectsInvalid(t *testing.T) {
+	c := newTestClient(t, Config{CasURL: "http://unused"}, nil)
+	var de *DataError
+	// byteEnd < byteStart.
+	if _, _, err := c.getSignedRange(t.Context(), fetchRange{url: "http://x", byteStart: 10, byteEnd: 5, chunkStart: 0, chunkEnd: 1}); !errors.As(err, &de) {
+		t.Fatalf("inverted byte range: want DataError, got %v", err)
+	}
+	// Empty chunk range.
+	if _, _, err := c.getSignedRange(t.Context(), fetchRange{url: "http://x", byteStart: 0, byteEnd: 5, chunkStart: 2, chunkEnd: 2}); !errors.As(err, &de) {
+		t.Fatalf("empty chunk range: want DataError, got %v", err)
+	}
+}
+
+func TestCacheMaxBytesFromEnv(t *testing.T) {
+	env := func(m map[string]string) func(string) string {
+		return func(k string) string { return m[k] }
+	}
+	if got := CacheMaxBytesFromEnv(env(nil)); got != DefaultCacheMaxBytes {
+		t.Fatalf("unset: got %d, want default %d", got, DefaultCacheMaxBytes)
+	}
+	if got := CacheMaxBytesFromEnv(env(map[string]string{EnvChunkCacheSize: "12345"})); got != 12345 {
+		t.Fatalf("valid: got %d, want 12345", got)
+	}
+	for _, bad := range []string{"", "  ", "0", "-5", "abc"} {
+		if got := CacheMaxBytesFromEnv(env(map[string]string{EnvChunkCacheSize: bad})); got != DefaultCacheMaxBytes {
+			t.Fatalf("bad %q: got %d, want default", bad, got)
+		}
+	}
+	if got := CacheMaxBytesFromEnv(nil); got != DefaultCacheMaxBytes {
+		t.Fatalf("nil getenv: got %d, want default", got)
 	}
 }

@@ -25,6 +25,18 @@ var ErrLocked = errors.New("store: state database is in use by another hfdl proc
 // live block leases remain: a stale writer must never race the verifier.
 var ErrLiveBlockLeases = errors.New("store: file still has live block leases")
 
+// ErrBlocksPending rejects TransitionFile(downloading→downloaded) while any
+// block is still pending/active: the file's bytes are only proven complete
+// once every scheduling block finished. A byte-complete resume (durable blob
+// already covers the whole file, single-stream fallback) must use
+// FinishDownloaded, which drops the stale block rows in the same tx.
+var ErrBlocksPending = errors.New("store: file still has unfinished blocks")
+
+// ErrTokenlessEdge rejects a tokenless (empty-token) TransitionFile whose
+// (from,to) edge is not one of the salvage/offline exceptions. Every other
+// status change must be fenced by a real lease token.
+var ErrTokenlessEdge = errors.New("store: tokenless transition not permitted for this edge")
+
 // NetFSError rejects a state DB located on a network filesystem: SQLite WAL
 // shared memory is unsafe on NFS/SMB/CIFS.
 type NetFSError struct {

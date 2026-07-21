@@ -6,6 +6,7 @@ import (
 	"log/slog"
 	"net/http"
 	"net/url"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -20,6 +21,29 @@ import (
 // DefaultCacheMaxBytes is the chunk-cache LRU cap applied when
 // Config.CacheMaxBytes is 0: 10 GiB.
 const DefaultCacheMaxBytes = int64(10) << 30 // 10 GiB
+
+// EnvChunkCacheSize is hf_xet's chunk-cache size override, in bytes.
+const EnvChunkCacheSize = "HF_XET_CHUNK_CACHE_SIZE_BYTES"
+
+// CacheMaxBytesFromEnv resolves the chunk-cache LRU cap from hf_xet's
+// HF_XET_CHUNK_CACHE_SIZE_BYTES env var, falling back to DefaultCacheMaxBytes
+// when it is unset, unparseable, or non-positive. cmd should build
+// Config.CacheMaxBytes with this (wire.go) so the hf_xet cache-size env is
+// honored instead of the cap being hardcoded to 10 GiB.
+func CacheMaxBytesFromEnv(getenv func(string) string) int64 {
+	if getenv == nil {
+		return DefaultCacheMaxBytes
+	}
+	v := strings.TrimSpace(getenv(EnvChunkCacheSize))
+	if v == "" {
+		return DefaultCacheMaxBytes
+	}
+	n, err := strconv.ParseInt(v, 10, 64)
+	if err != nil || n <= 0 {
+		return DefaultCacheMaxBytes
+	}
+	return n
+}
 
 // tokenRefreshSkew mirrors hf_xet's REFRESH_BUFFER_SEC
 // (xet_client/src/cas_client/auth.rs): a cached token is treated as expired
@@ -177,7 +201,7 @@ func (c *Client) doCAS(ctx context.Context, route, reqURL, rangeHeader string) (
 			}
 			continue
 		case http.StatusTooManyRequests:
-			ra := parseRetryAfter(resp.Header.Get("Retry-After"))
+			ra := hfapi.ParseRetryAfter(resp.Header.Get("Retry-After"))
 			_ = resp.Body.Close()
 			return nil, &hfapi.RateLimitError{RetryAfter: ra}
 		default:

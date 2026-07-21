@@ -193,6 +193,41 @@ func TestBucketWaitNExceedsBurst(t *testing.T) {
 	}
 }
 
+func TestBucketWaitCancelRecordsConsumed(t *testing.T) {
+	// n > burst: the first installment (burst=100) is consumed immediately,
+	// then the wait for the remainder is cancelled. The consumed installment
+	// must still be recorded in the windowed ring (not silently leaked).
+	b := NewBucket(10, 100) // burst 100 starts full; 10/s so the 2nd installment stalls
+	ctx, cancel := context.WithCancel(t.Context())
+	done := make(chan error, 1)
+	go func() { done <- b.Wait(ctx, 150) }() // 100 now, 50 more at 10/s -> ~5s
+	waitFor(t, 2*time.Second, func() bool { return b.Stats().Waiters == 1 }, "blocked on 2nd installment")
+	cancel()
+	if err := <-done; !errors.Is(err, context.Canceled) {
+		t.Fatalf("Wait returned %v, want context.Canceled", err)
+	}
+	if got := b.ring.Sum(b.clock.Now(), 0); got != 100 {
+		t.Fatalf("recorded consumed = %d, want 100 (first installment)", got)
+	}
+}
+
+func TestBucketSetRateClampsNegativeTokens(t *testing.T) {
+	// A bucket built unlimited with burst < 1 holds a negative token balance.
+	// SetRate to a limited rate must clamp tokens into [0, burst] so the next
+	// Wait is not spuriously blocked.
+	b := NewBucket(0, -5) // unlimited; tokens = -5
+	b.SetRate(1000, 100)
+	b.mu.Lock()
+	tok := b.tokens
+	b.mu.Unlock()
+	if tok < 0 || tok > 100 {
+		t.Fatalf("tokens after SetRate = %v, want within [0,100]", tok)
+	}
+	if got := b.Stats().Burst; got != 100 {
+		t.Fatalf("burst after SetRate = %d, want 100", got)
+	}
+}
+
 func TestBucketWindowedRateFakeClock(t *testing.T) {
 	fc := newFakeClock()
 	b := NewBucket(0, 0) // unlimited: Wait consumes without pacing

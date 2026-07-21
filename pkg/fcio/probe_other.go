@@ -1,4 +1,4 @@
-//go:build !linux
+//go:build !linux && !windows && !darwin
 
 package fcio
 
@@ -8,7 +8,8 @@ import (
 	"path/filepath"
 )
 
-// ProbeFs has no media-class probing off Linux: always FsUnknown.
+// ProbeFs has no media-class probing on genuinely-unknown platforms (Windows
+// and macOS have real probes): always FsUnknown.
 func ProbeFs(ctx context.Context, path string) (FsType, error) {
 	if err := ctx.Err(); err != nil {
 		return FsUnknown, err

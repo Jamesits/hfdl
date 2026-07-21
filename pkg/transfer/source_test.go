@@ -231,7 +231,7 @@ func TestRangelessMarkAndFallback(t *testing.T) {
 	if !errors.Is(err, errAllRangeless) {
 		t.Fatalf("got %v, want errAllRangeless", err)
 	}
-	whole, err := src2.Open(ctx, 0, int64(len(content))) // fallback path
+	whole, err := src2.openWhole(ctx) // fallback path: ranged Open now fails errAllRangeless
 	if err != nil {
 		t.Fatalf("fallback open: %v", err)
 	}

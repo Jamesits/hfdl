@@ -23,6 +23,22 @@ func TestResolveToken(t *testing.T) {
 	if err := os.WriteFile(filepath.Join(hfHome, "token"), []byte("home-tok\n"), 0o600); err != nil {
 		t.Fatal(err)
 	}
+	// $XDG_CACHE_HOME/huggingface/token — the implicit fallback when HF_HOME is unset.
+	xdgCache := filepath.Join(dir, "xdg-cache")
+	if err := os.MkdirAll(filepath.Join(xdgCache, "huggingface"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(xdgCache, "huggingface", "token"), []byte("xdg-tok\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	// ~/.cache/huggingface/token — the default when neither HF_HOME nor XDG_CACHE_HOME is set.
+	homeDir := filepath.Join(dir, "home")
+	if err := os.MkdirAll(filepath.Join(homeDir, ".cache", "huggingface"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(homeDir, ".cache", "huggingface", "token"), []byte("default-home-tok\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
 
 	cases := []struct {
 		name string
@@ -45,6 +61,18 @@ func TestResolveToken(t *testing.T) {
 		{name: "HF_HOME token trimmed",
 			env:  map[string]string{"HF_HOME": hfHome},
 			want: "home-tok"},
+		{name: "implicit falls back to XDG_CACHE_HOME/huggingface when HF_HOME unset",
+			env:  map[string]string{"XDG_CACHE_HOME": xdgCache},
+			want: "xdg-tok"},
+		{name: "implicit falls back to ~/.cache/huggingface when HF_HOME and XDG unset",
+			env:  map[string]string{"HOME": homeDir},
+			want: "default-home-tok"},
+		{name: "HF_HOME wins over XDG_CACHE_HOME",
+			env:  map[string]string{"HF_HOME": hfHome, "XDG_CACHE_HOME": xdgCache},
+			want: "home-tok"},
+		{name: "default implicit lookup honors disable flag",
+			env:  map[string]string{"HOME": homeDir, "HF_HUB_DISABLE_IMPLICIT_TOKEN": "1"},
+			want: ""},
 		{name: "implicit token disabled",
 			env:  map[string]string{"HF_HOME": hfHome, "HF_HUB_DISABLE_IMPLICIT_TOKEN": "true"},
 			want: ""},

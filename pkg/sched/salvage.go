@@ -8,6 +8,7 @@ import (
 	"path/filepath"
 	"strings"
 
+	"github.com/jamesits/hfdl/pkg/cache"
 	"github.com/jamesits/hfdl/pkg/logging"
 	"github.com/jamesits/hfdl/pkg/store"
 )
@@ -110,7 +111,7 @@ func (m *Manager) statReference(ctx context.Context, path string, j Job) (store.
 		m.log.Debug("reference path rejected (inside cache/destination)", "path", resolved)
 		return store.ReferenceFile{}, false
 	}
-	dev, ino := devIno(info)
+	dev, ino := devIno(resolved, info)
 	return store.ReferenceFile{
 		Path:    resolved,
 		Size:    info.Size(),
@@ -156,7 +157,7 @@ func jobDestRoot(j Job) string {
 	if j.DestMode == store.DestModeLocalDir {
 		return abs
 	}
-	return filepath.Join(abs, repoCacheDirName(string(j.RepoType), j.Repo))
+	return filepath.Join(abs, cache.ModelDirName(string(j.RepoType), j.Repo))
 }
 
 // activeDestRoots tracks destinations of all submitted jobs (registered at
@@ -167,10 +168,15 @@ func (m *Manager) activeDestRoots() []string {
 	return append([]string(nil), m.dests...)
 }
 
-// insideDir reports whether path lies inside dir (both absolute, cleaned).
+// insideDir reports whether path lies inside dir (both absolute, cleaned). The
+// comparison is case-insensitive: on case-insensitive filesystems (macOS,
+// Windows) a reference inside the cache/dest under a different case must still
+// be excluded, or it could salvage from a mid-write install target. Over-
+// exclusion on case-sensitive filesystems only skips a rare case-variant
+// salvage source, which is safe (that content still downloads).
 func insideDir(path, dir string) bool {
-	dir = filepath.Clean(dir)
-	path = filepath.Clean(path)
+	dir = strings.ToLower(filepath.Clean(dir))
+	path = strings.ToLower(filepath.Clean(path))
 	if path == dir {
 		return true
 	}

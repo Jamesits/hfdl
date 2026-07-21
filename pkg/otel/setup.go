@@ -77,12 +77,22 @@ func Setup(ctx context.Context, getenv func(string) string, version string, src 
 		propagation.TraceContext{}, propagation.Baggage{},
 	))
 
+	// fail shuts down whatever signals were already built before returning a
+	// setup error, so a partial failure (e.g. metrics fails after the tracer
+	// is live) never leaks exporters or background goroutines.
+	fail := func(err error) (*Providers, error) {
+		for _, sd := range p.shutdowns {
+			_ = sd(ctx)
+		}
+		return nil, err
+	}
+
 	if on, unknown := signalExporter(getenv, "TRACES"); unknown != "" {
 		errHandler.logUnknown(envTracesExporter, unknown)
 	} else if on {
 		tp, err := setupTracer(ctx, getenv, res)
 		if err != nil {
-			return nil, err
+			return fail(err)
 		}
 		p.tp = tp
 		p.shutdowns = append(p.shutdowns, tp.Shutdown)
@@ -93,7 +103,7 @@ func Setup(ctx context.Context, getenv func(string) string, version string, src 
 	} else if on {
 		mp, err := setupMeter(ctx, getenv, res, src)
 		if err != nil {
-			return nil, err
+			return fail(err)
 		}
 		p.mp = mp
 		p.shutdowns = append(p.shutdowns, mp.Shutdown)
@@ -104,7 +114,7 @@ func Setup(ctx context.Context, getenv func(string) string, version string, src 
 	} else if on {
 		lp, err := setupLogger(ctx, getenv, res)
 		if err != nil {
-			return nil, err
+			return fail(err)
 		}
 		p.lp = lp
 		p.bridge = otelslog.NewHandler(serviceName,
@@ -170,8 +180,10 @@ func setupMeter(ctx context.Context, getenv func(string) string, res *resource.R
 	return mp, nil
 }
 
-// setupLogger builds the SDK LoggerProvider with a batch processor;
-// export is asynchronous and best-effort.
+// setupLogger builds the SDK LoggerProvider with a batch processor; export
+// is asynchronous and best-effort. The batch log record processor honors
+// OTEL_BLRP_* natively through its option defaults (same as the trace batch
+// processor and OTEL_BSP_*), so no manual wiring is needed here.
 func setupLogger(ctx context.Context, getenv func(string) string, res *resource.Resource) (*sdklog.LoggerProvider, error) {
 	var (
 		exp sdklog.Exporter

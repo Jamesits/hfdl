@@ -57,10 +57,10 @@ func TestSafeJoin(t *testing.T) {
 	}
 }
 
-// The leaf itself may be an existing symlink pointing outside the root —
-// only the ancestor chain is containment-checked, because huggingface_hub
-// snapshot entries are symlinks into blobs/ by design.
-func TestSafeJoinLeafSymlinkAllowed(t *testing.T) {
+// SafeJoin (pointer-install mode) permits a leaf that is a symlink escaping
+// root: huggingface_hub snapshot entries are relative symlinks into blobs/
+// (a sibling of snapshots/) that hfdl creates and replaces without following.
+func TestSafeJoinPointerLeafSymlinkAllowed(t *testing.T) {
 	root := t.TempDir()
 	outside := filepath.Join(t.TempDir(), "target")
 	if err := os.WriteFile(outside, []byte("x"), 0o644); err != nil {
@@ -70,6 +70,41 @@ func TestSafeJoinLeafSymlinkAllowed(t *testing.T) {
 		t.Fatal(err)
 	}
 	if _, err := SafeJoin(root, "leaf"); err != nil {
-		t.Fatalf("SafeJoin(leaf symlink): %v", err)
+		t.Fatalf("SafeJoin pointer(leaf symlink): %v", err)
+	}
+}
+
+// SafeJoinContent (content-write mode) rejects a pre-existing leaf symlink
+// that escapes root: a planted symlink must never redirect an O_TRUNC write
+// outside the destination tree (symlink-escape rejection).
+func TestSafeJoinContentLeafSymlinkEscapeRejected(t *testing.T) {
+	root := t.TempDir()
+	outside := filepath.Join(t.TempDir(), "target")
+	if err := os.WriteFile(outside, []byte("x"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(outside, filepath.Join(root, "leaf")); err != nil {
+		t.Fatal(err)
+	}
+	_, err := SafeJoinContent(root, "leaf")
+	var pse *PathSafetyError
+	if !errors.As(err, &pse) {
+		t.Fatalf("SafeJoinContent(escaping leaf symlink) err = %v, want PathSafetyError", err)
+	}
+}
+
+// SafeJoinContent permits a leaf symlink that stays inside root (contained):
+// only escapes are rejected, not every symlink.
+func TestSafeJoinContentLeafSymlinkInsideAllowed(t *testing.T) {
+	root := t.TempDir()
+	inside := filepath.Join(root, "real")
+	if err := os.WriteFile(inside, []byte("x"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(inside, filepath.Join(root, "leaf")); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := SafeJoinContent(root, "leaf"); err != nil {
+		t.Fatalf("SafeJoinContent(inside leaf symlink): %v", err)
 	}
 }

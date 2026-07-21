@@ -5,7 +5,9 @@ import (
 	"sync"
 )
 
-// VolumeID identifies a physical volume (st_dev-based on Linux).
+// VolumeID identifies a whole physical device (spindle). On Linux it is the
+// whole disk's dev "major:minor" resolved from st_dev via /sys/dev/block, so
+// two partitions of one disk share an id.
 type VolumeID string
 
 // VolumeSet is the FastCopy driveMng.OccupancyDrives analog:

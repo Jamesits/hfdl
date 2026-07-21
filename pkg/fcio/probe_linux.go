@@ -50,32 +50,62 @@ func ProbeFs(ctx context.Context, path string) (FsType, error) {
 	return FsSSD, nil
 }
 
-// lookupRotational resolves st_dev through /sys/dev/block and ascends from a
-// partition symlink to the whole-device directory holding queue/rotational.
-func lookupRotational(dev uint64) (bool, error) {
+// blockDeviceDir resolves st_dev through /sys/dev/block and ascends from the
+// partition symlink to the whole-device sysfs directory — the one that owns
+// queue/rotational. Both media classification and volume identity key on the
+// whole device, so every partition of one disk resolves to the same
+// directory. Errors (device-mapper, loop, netfs, tmpfs — no block queue
+// behind them) leave the caller to fall back.
+func blockDeviceDir(dev uint64) (string, error) {
 	link := fmt.Sprintf("/sys/dev/block/%d:%d", unix.Major(dev), unix.Minor(dev))
 	target, err := os.Readlink(link)
 	if err != nil {
-		return false, fmt.Errorf("readlink %s: %w", link, err)
+		return "", fmt.Errorf("readlink %s: %w", link, err)
 	}
 	if !filepath.IsAbs(target) {
 		target = filepath.Join(filepath.Dir(link), target)
 	}
 	for p := filepath.Clean(target); strings.HasPrefix(p, "/sys"); p = filepath.Dir(p) {
-		b, err := os.ReadFile(filepath.Join(p, "queue", "rotational"))
-		if err == nil {
-			return strings.TrimSpace(string(b)) == "1", nil
+		if _, err := os.Stat(filepath.Join(p, "queue", "rotational")); err == nil {
+			return p, nil
 		}
 	}
-	return false, fmt.Errorf("no queue/rotational found under %s", target)
+	return "", fmt.Errorf("no queue/rotational found under %s", target)
 }
 
-// statVolumeID identifies the volume behind path by st_dev ("major:minor").
+// lookupRotational reports whether the whole device behind st_dev is a
+// spinning disk (queue/rotational == 1).
+func lookupRotational(dev uint64) (bool, error) {
+	dir, err := blockDeviceDir(dev)
+	if err != nil {
+		return false, err
+	}
+	b, err := os.ReadFile(filepath.Join(dir, "queue", "rotational"))
+	if err != nil {
+		return false, fmt.Errorf("read rotational under %s: %w", dir, err)
+	}
+	return strings.TrimSpace(string(b)) == "1", nil
+}
+
+// statVolumeID identifies the whole physical device (spindle) behind path so
+// two partitions on one disk share a VolumeID and a mixed-R/W job never
+// overlaps another job on the same spindle. It keys on the whole
+// device's dev "major:minor" (from the sysfs dev file), falling back to the
+// device directory name and finally to the partition's own st_dev when the
+// sysfs walk cannot resolve a whole device.
 func statVolumeID(path string) (VolumeID, error) {
 	p := existingAncestor(path)
 	var st unix.Stat_t
 	if err := unix.Stat(p, &st); err != nil {
 		return "", fmt.Errorf("fcio: stat volume %s: %w", p, err)
+	}
+	if dir, err := blockDeviceDir(st.Dev); err == nil {
+		if b, rerr := os.ReadFile(filepath.Join(dir, "dev")); rerr == nil {
+			if s := strings.TrimSpace(string(b)); s != "" {
+				return VolumeID(s), nil
+			}
+		}
+		return VolumeID(filepath.Base(dir)), nil
 	}
 	return VolumeID(fmt.Sprintf("%d:%d", unix.Major(st.Dev), unix.Minor(st.Dev))), nil
 }

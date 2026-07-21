@@ -4,8 +4,10 @@ import (
 	"context"
 	"database/sql"
 	"fmt"
+	"net/url"
 	"os"
 	"path/filepath"
+	"sync"
 	"time"
 
 	"github.com/oklog/ulid/v2"
@@ -17,12 +19,14 @@ import (
 const (
 	driverName = "sqlite" // modernc.org/sqlite registration
 
-	// Per-connection pragmas live in the DSN so every pooled connection is
-	// configured; journal_mode=WAL is persistent and set once in Open.
+	// Per-connection pragmas live in the DSN query so every pooled connection
+	// is configured; journal_mode=WAL is persistent and set once in Open.
 	// _txlock=immediate makes every tx take the write lock at BEGIN —
 	// deferred read-then-write txs die with SQLITE_BUSY_SNAPSHOT (517)
-	// under WAL write contention, which busy_timeout cannot repair.
-	dsnSuffix = "?_pragma=busy_timeout(5000)&_pragma=foreign_keys(1)&_pragma=synchronous(NORMAL)&_txlock=immediate"
+	// under WAL write contention, which busy_timeout cannot repair. This is
+	// the raw query; the path is joined via url.URL so spaces/?/# in the path
+	// are percent-encoded rather than corrupting the DSN.
+	dsnQuery = "_pragma=busy_timeout(5000)&_pragma=foreign_keys(1)&_pragma=synchronous(NORMAL)&_txlock=immediate"
 
 	// leaseDuration bounds how long a claim survives without a RenewLease
 	// heartbeat before Recover may requeue the row.
@@ -39,6 +43,17 @@ type Store struct {
 	path  string
 	lock  *os.File // <path>.lock, held for the process lifetime
 	owner string   // per-Open instance ULID, used as lease_owner on claims
+
+	closeOnce sync.Once
+	closeErr  error
+}
+
+// dsn builds the modernc.org/sqlite file URI for path with the per-connection
+// pragma query. url.URL percent-encodes the path, so spaces or reserved
+// characters (?, #) in the state-db path never corrupt the DSN.
+func dsn(path string) string {
+	u := url.URL{Scheme: "file", Path: path, RawQuery: dsnQuery}
+	return u.String()
 }
 
 // Open opens (creating if needed) and migrates the state database at path.
@@ -64,7 +79,7 @@ func Open(ctx context.Context, path string) (*Store, error) {
 		return nil, err
 	}
 
-	sqldb, err := sql.Open(driverName, "file:"+path+dsnSuffix)
+	sqldb, err := sql.Open(driverName, dsn(path))
 	if err != nil {
 		_ = releaseLock(lock)
 		return nil, fmt.Errorf("store: open %s: %w", path, err)
@@ -93,21 +108,25 @@ func Open(ctx context.Context, path string) (*Store, error) {
 	return s, nil
 }
 
-// Close releases the database and the process lock. Idempotent.
+// Close releases the database and the process lock. Idempotent and safe to
+// call concurrently: the teardown runs exactly once (sync.Once) and every
+// caller sees the same result. The handle fields are not nil'd, so a
+// concurrent DB()/query observes a closed handle (a returned error) rather
+// than a nil-pointer panic.
 func (s *Store) Close(ctx context.Context) error {
-	var err error
-	if s.db != nil {
-		err = s.db.Close()
-		s.db = nil
-	}
-	if lerr := releaseLock(s.lock); err == nil {
-		err = lerr
-	}
-	s.lock = nil
-	if err != nil {
-		return fmt.Errorf("store: close: %w", err)
-	}
-	return nil
+	s.closeOnce.Do(func() {
+		var err error
+		if s.db != nil {
+			err = s.db.Close()
+		}
+		if lerr := releaseLock(s.lock); err == nil {
+			err = lerr
+		}
+		if err != nil {
+			s.closeErr = fmt.Errorf("store: close: %w", err)
+		}
+	})
+	return s.closeErr
 }
 
 // DB exposes the underlying handle for read-only queries not covered by the

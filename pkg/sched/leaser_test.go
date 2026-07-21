@@ -43,7 +43,7 @@ func TestPendingStateRealTimestamp(t *testing.T) {
 	if err != nil {
 		t.Fatalf("LeaseFileForDownload: %v", err)
 	}
-	if err := env.st.ReplacePendingBlocks(ctx, fileID, []store.Block{
+	if err := env.st.ReplacePendingBlocks(ctx, fileID, ftok, []store.Block{
 		{FileID: fileID, Idx: 0, Offset: 0, Length: 100},
 	}); err != nil {
 		t.Fatalf("ReplacePendingBlocks: %v", err)

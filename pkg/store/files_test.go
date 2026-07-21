@@ -27,8 +27,26 @@ func TestTransitionFileLiveLeaseRejected(t *testing.T) {
 		t.Fatalf("file status = %s after rejected transition, want downloading", st)
 	}
 
-	// Finish both blocks: transition succeeds and ends the lease.
+	// Complete only the leased block: the file has a second, still-pending
+	// block, so it is NOT byte-complete and the transition must be rejected —
+	// downloaded means every block done, not just the leased ones.
 	if _, err := s.CompleteBlock(ctx, leased[0].ID, leased[0].Token); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.TransitionFile(ctx, fileID, tok, FileDownloading, FileDownloaded, nil); !errors.Is(err, ErrBlocksPending) {
+		t.Fatalf("TransitionFile with a pending block err = %v, want ErrBlocksPending", err)
+	}
+	if st := fileStatus(t, s, fileID); st != FileDownloading {
+		t.Fatalf("file status = %s after rejected transition, want downloading", st)
+	}
+
+	// Finish the remaining block: now every block is done and the transition
+	// succeeds and ends the lease.
+	rest, err := s.LeaseBlocks(ctx, 1, BlockFilter{FileIDs: []int64{fileID}}, time.Now())
+	if err != nil || len(rest) != 1 {
+		t.Fatalf("LeaseBlocks (remaining): %v (%d)", err, len(rest))
+	}
+	if _, err := s.CompleteBlock(ctx, rest[0].ID, rest[0].Token); err != nil {
 		t.Fatal(err)
 	}
 	if err := s.TransitionFile(ctx, fileID, tok, FileDownloading, FileDownloaded, nil); err != nil {
@@ -234,7 +252,7 @@ func TestReplacePendingBlocks(t *testing.T) {
 	ctx := t.Context()
 	repoID, _ := seedListedRepo(t, s, "org/repo", []FileEntry{{Path: "a", Size: 400, GitOID: "g"}})
 	fileID := mustFileID(t, s, repoID, "a")
-	leaseFile(t, s, fileID, 2)
+	tok := leaseFile(t, s, fileID, 2)
 
 	// One block done: re-chunking keeps it, replaces only pending.
 	leased, _ := s.LeaseBlocks(ctx, 1, BlockFilter{FileIDs: []int64{fileID}}, time.Now())
@@ -242,7 +260,7 @@ func TestReplacePendingBlocks(t *testing.T) {
 		t.Fatal(err)
 	}
 	rechunk := []Block{{Idx: 1, Offset: 100, Length: 50}, {Idx: 2, Offset: 150, Length: 50}, {Idx: 3, Offset: 200, Length: 200}}
-	if err := s.ReplacePendingBlocks(ctx, fileID, rechunk); err != nil {
+	if err := s.ReplacePendingBlocks(ctx, fileID, tok, rechunk); err != nil {
 		t.Fatalf("ReplacePendingBlocks: %v", err)
 	}
 	var pending, done int
@@ -262,7 +280,7 @@ func TestReplacePendingBlocks(t *testing.T) {
 	if _, err := s.db.ExecContext(ctx, "UPDATE files SET status = ? WHERE id = ?", string(FileCached), fileID); err != nil {
 		t.Fatal(err)
 	}
-	if err := s.ReplacePendingBlocks(ctx, fileID, rechunk); !errors.Is(err, ErrFenced) {
+	if err := s.ReplacePendingBlocks(ctx, fileID, tok, rechunk); !errors.Is(err, ErrFenced) {
 		t.Fatalf("ReplacePendingBlocks on cached err = %v, want ErrFenced", err)
 	}
 }

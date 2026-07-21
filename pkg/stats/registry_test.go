@@ -79,6 +79,66 @@ func TestEMAUpdateAndPenalize(t *testing.T) {
 	}
 }
 
+func TestFileAndGlobalEMA(t *testing.T) {
+	r, _ := newTestRegistry()
+
+	// Per-file EMA (α=0.2): 0.2*100 + 0.8*0 = 20, then 0.2*100 + 0.8*20 = 36.
+	r.ReportFileRate(1, 100)
+	if got := r.Snapshot().Files[1].EMABps; math.Abs(got-20) > 1e-9 {
+		t.Fatalf("file EMA after first sample = %v, want 20", got)
+	}
+	r.ReportFileRate(1, 100)
+	if got := r.Snapshot().Files[1].EMABps; math.Abs(got-36) > 1e-9 {
+		t.Fatalf("file EMA after second sample = %v, want 36", got)
+	}
+
+	// Global EMA is fed by ReportUpstreamRate: 0.2*100 + 0.8*0 = 20.
+	r.ReportUpstreamRate("cdn-a", 100)
+	if got := r.Snapshot().GlobalEMABps; math.Abs(got-20) > 1e-9 {
+		t.Fatalf("global EMA after first sample = %v, want 20", got)
+	}
+}
+
+func TestUpstreamWindowedRate(t *testing.T) {
+	r, c := newTestRegistry()
+	r.AddUpstream("cdn-a", 100)
+	c.advance(time.Second)
+	r.AddUpstream("cdn-a", 50)
+	c.advance(time.Second)
+	// 150 B over the 10s window -> 15 B/s.
+	if got := r.Snapshot().Upstreams["cdn-a"].WindowedRate; got != 15 {
+		t.Fatalf("upstream WindowedRate = %v, want 15", got)
+	}
+	// Whole window expires -> rate drains, cumulative bytes stay.
+	c.advance(20 * time.Second)
+	s := r.Snapshot()
+	if s.Upstreams["cdn-a"].WindowedRate != 0 {
+		t.Fatalf("WindowedRate after expiry = %v, want 0", s.Upstreams["cdn-a"].WindowedRate)
+	}
+	if s.Upstreams["cdn-a"].Bytes != 150 {
+		t.Fatalf("upstream Bytes = %d, want 150", s.Upstreams["cdn-a"].Bytes)
+	}
+}
+
+func TestConnEndUnpairedClampsAtZero(t *testing.T) {
+	r, _ := newTestRegistry()
+	r.ConnStart(1, "cdn-a")
+
+	// Duplicate/unpaired ends must not drive gauges negative.
+	r.ConnEnd(1, "cdn-a") // the real pairing
+	r.ConnEnd(1, "cdn-a") // duplicate: dropped
+	r.ConnEnd(1, "cdn-a") // duplicate: dropped
+	r.ConnEnd(2, "cdn-b") // never started: dropped
+
+	s := r.Snapshot()
+	if s.Conns != 0 {
+		t.Errorf("global Conns = %d, want 0 (no negative)", s.Conns)
+	}
+	if got := s.Upstreams["cdn-a"].Conns; got != 0 {
+		t.Errorf("cdn-a Conns = %d, want 0 (no negative)", got)
+	}
+}
+
 func TestWindowedRatesWithFakeClock(t *testing.T) {
 	r, c := newTestRegistry()
 
@@ -186,13 +246,15 @@ func TestRemoveFile(t *testing.T) {
 	if _, ok := s.Files[2]; !ok {
 		t.Error("file 2 missing after unrelated RemoveFile")
 	}
-	if s.Conns != 2 || s.Upstreams["cdn-a"].Conns != 2 {
-		t.Errorf("gauges after RemoveFile = %d/%d, want 2/2", s.Conns, s.Upstreams["cdn-a"].Conns)
+	// RemoveFile reconciles file 1's one live conn out of the global and
+	// upstream gauges immediately, leaving only file 2's conn.
+	if s.Conns != 1 || s.Upstreams["cdn-a"].Conns != 1 {
+		t.Errorf("gauges after RemoveFile = %d/%d, want 1/1", s.Conns, s.Upstreams["cdn-a"].Conns)
 	}
 
-	// The straggler's ConnEnd arrives after removal: global and upstream
-	// gauges still settle (the conn was real), but the file entry must not
-	// be recreated.
+	// The straggler's ConnEnd arrives after removal: it is unpaired now (the
+	// file entry is gone and was already reconciled), so it is dropped — the
+	// gauges must NOT be decremented a second time, nor the file recreated.
 	r.ConnEnd(1, "cdn-a")
 	s = r.Snapshot()
 	if _, ok := s.Files[1]; ok {

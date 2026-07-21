@@ -55,9 +55,10 @@ func (e *AuthError) Error() string {
 	return "hfapi: authentication failed: " + e.Msg
 }
 
-// parseRetryAfter interprets a Retry-After header value: either
-// delta-seconds or an HTTP-date. Unparseable/absent yields 0.
-func parseRetryAfter(h string) time.Duration {
+// ParseRetryAfter interprets a Retry-After header value: either delta-seconds
+// or an HTTP-date. Unparseable/absent yields 0. Exported so xet (which maps CAS
+// 429s onto hfapi.RateLimitError) shares one implementation.
+func ParseRetryAfter(h string) time.Duration {
 	h = strings.TrimSpace(h)
 	if h == "" {
 		return 0

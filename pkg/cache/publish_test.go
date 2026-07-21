@@ -20,11 +20,11 @@ func TestPublish(t *testing.T) {
 	s, _ := newTestStore(t)
 	data := []byte("verified blob bytes")
 	stagePart(t, s, 7, data)
-	got, err := s.Publish(t.Context(), 7, "blobA")
+	got, err := s.Publish(t.Context(), 7, hexIDa)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if want := s.BlobPath("blobA"); got != want {
+	if want := s.BlobPath(hexIDa); got != want {
 		t.Errorf("Publish path = %q, want %q", got, want)
 	}
 	onDisk, err := os.ReadFile(got)
@@ -51,7 +51,7 @@ func TestPublishRaceEEXIST(t *testing.T) {
 		wg.Add(1)
 		go func(i int, id int64) {
 			defer wg.Done()
-			paths[i], errs[i] = s.Publish(t.Context(), id, "blobX")
+			paths[i], errs[i] = s.Publish(t.Context(), id, hexIDb)
 		}(i, id)
 	}
 	wg.Wait()
@@ -60,7 +60,7 @@ func TestPublishRaceEEXIST(t *testing.T) {
 			t.Fatalf("publisher %d: %v", i, errs[i])
 		}
 	}
-	if paths[0] != paths[1] || paths[0] != s.BlobPath("blobX") {
+	if paths[0] != paths[1] || paths[0] != s.BlobPath(hexIDb) {
 		t.Errorf("paths = %q, %q", paths[0], paths[1])
 	}
 	onDisk, err := os.ReadFile(paths[0])
@@ -79,16 +79,16 @@ func TestPublishRaceEEXIST(t *testing.T) {
 // EEXIST with a different size is corruption, not a benign race.
 func TestPublishSizeConflict(t *testing.T) {
 	s, _ := newTestStore(t)
-	if err := os.WriteFile(s.BlobPath("conf"), []byte("old"), 0o644); err != nil {
+	if err := os.WriteFile(s.BlobPath(hexIDc), []byte("old"), 0o644); err != nil {
 		t.Fatal(err)
 	}
 	stagePart(t, s, 9, []byte("newer"))
-	_, err := s.Publish(t.Context(), 9, "conf")
+	_, err := s.Publish(t.Context(), 9, hexIDc)
 	var cerr *BlobConflictError
 	if !errors.As(err, &cerr) {
 		t.Fatalf("err = %v, want *BlobConflictError", err)
 	}
-	if cerr.BlobID != "conf" || cerr.Want != 5 || cerr.Have != 3 {
+	if cerr.BlobID != hexIDc || cerr.Want != 5 || cerr.Have != 3 {
 		t.Errorf("BlobConflictError = %+v", cerr)
 	}
 }

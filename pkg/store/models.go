@@ -79,20 +79,21 @@ type FileEntry struct {
 type Repo struct {
 	bun.BaseModel `bun:"table:repos,alias:r"`
 
-	ID         int64      `bun:"id,pk,autoincrement"`
-	Type       string     `bun:"type,notnull"`
-	Name       string     `bun:"name,notnull"` // org/repo
-	Revision   string     `bun:"revision,notnull"`
-	CommitSHA  string     `bun:"commit_sha,nullzero"` // resolved once, then immutable
-	Endpoint   string     `bun:"endpoint,notnull"`
-	Status     RepoStatus `bun:"status,notnull"`
-	Retries    int        `bun:"retries,notnull"`
-	LastError  string     `bun:"last_error,nullzero"`
-	LeaseOwner string     `bun:"lease_owner,nullzero"`
-	LeaseToken string     `bun:"lease_token,nullzero"`
-	LeaseUntil *time.Time `bun:"lease_until"`
-	CreatedAt  time.Time  `bun:"created_at,notnull"`
-	UpdatedAt  time.Time  `bun:"updated_at,notnull"`
+	ID          int64      `bun:"id,pk,autoincrement"`
+	Type        string     `bun:"type,notnull"`
+	Name        string     `bun:"name,notnull"` // org/repo
+	Revision    string     `bun:"revision,notnull"`
+	CommitSHA   string     `bun:"commit_sha,nullzero"` // resolved once, then immutable
+	Endpoint    string     `bun:"endpoint,notnull"`
+	Status      RepoStatus `bun:"status,notnull"`
+	Retries     int        `bun:"retries,notnull"`
+	LastError   string     `bun:"last_error,nullzero"`
+	AvailableAt *time.Time `bun:"available_at"` // durable meta-retry backoff
+	LeaseOwner  string     `bun:"lease_owner,nullzero"`
+	LeaseToken  string     `bun:"lease_token,nullzero"`
+	LeaseUntil  *time.Time `bun:"lease_until"`
+	CreatedAt   time.Time  `bun:"created_at,notnull"`
+	UpdatedAt   time.Time  `bun:"updated_at,notnull"`
 }
 
 type Job struct {

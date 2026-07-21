@@ -8,6 +8,7 @@ import (
 	"sync"
 
 	"go.opentelemetry.io/contrib/instrumentation/net/http/otelhttp"
+	"go.opentelemetry.io/otel"
 	otellog "go.opentelemetry.io/otel/log"
 	lognoop "go.opentelemetry.io/otel/log/noop"
 	"go.opentelemetry.io/otel/metric"
@@ -71,6 +72,11 @@ func (p *Providers) SlogBridge() slog.Handler {
 // HTTPTransport wraps base with otelhttp instrumentation (W3C traceparent
 // propagation toward Hub/CDN/CAS). When disabled it returns base unchanged.
 // A nil base means http.DefaultTransport.
+//
+// The configured TracerProvider and propagator are passed explicitly: hfdl
+// keeps its providers local (it never calls otel.SetTracerProvider), so
+// without WithTracerProvider otelhttp would emit spans through the global
+// noop. The propagator is the composite Setup installs globally.
 func (p *Providers) HTTPTransport(base http.RoundTripper) http.RoundTripper {
 	if !p.Enabled {
 		return base
@@ -78,7 +84,10 @@ func (p *Providers) HTTPTransport(base http.RoundTripper) http.RoundTripper {
 	if base == nil {
 		base = http.DefaultTransport
 	}
-	return otelhttp.NewTransport(base)
+	return otelhttp.NewTransport(base,
+		otelhttp.WithTracerProvider(p.tp),
+		otelhttp.WithPropagators(otel.GetTextMapPropagator()),
+	)
 }
 
 // Shutdown flushes and shuts providers down in order — tracer, then

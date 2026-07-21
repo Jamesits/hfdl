@@ -58,8 +58,16 @@ func Enabled(getenv func(string) string) bool {
 	return false
 }
 
+// truthy accepts the standard boolean-truthy set (case-insensitive), not just
+// "true": OTEL_SDK_DISABLED=1/yes/on all disable the SDK. Anything else
+// (including "false", "0", "", unparseable) is not truthy.
 func truthy(v string) bool {
-	return strings.EqualFold(strings.TrimSpace(v), "true")
+	switch strings.ToLower(strings.TrimSpace(v)) {
+	case "1", "t", "true", "y", "yes", "on":
+		return true
+	default:
+		return false
+	}
 }
 
 // signalExporter reports whether the given signal ("TRACES", "METRICS",

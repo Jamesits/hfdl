@@ -63,7 +63,9 @@ func (s *Store) migrate(ctx context.Context) error {
 	// Open before this runs) guarantees no concurrent migrator.
 	if err := migrator.Lock(ctx); err != nil {
 		if uerr := migrator.Unlock(ctx); uerr != nil {
-			return fmt.Errorf("store: break stale migration lock: %w", err)
+			// The break itself failed: surface the Unlock error (the actual
+			// failure), keeping the original Lock error as context.
+			return fmt.Errorf("store: break stale migration lock (initial lock error: %v): %w", err, uerr)
 		}
 		if lerr := migrator.Lock(ctx); lerr != nil {
 			return fmt.Errorf("store: acquire migration lock: %w", lerr)

@@ -35,7 +35,15 @@ type core struct {
 	dbQueue chan LogRow
 	dbStop  chan struct{}
 	dbDone  chan struct{}
-	closed  bool
+	// dbSince is the ring Seq horizon captured under c.mu when AttachDB took
+	// its replay snapshot: Handle enqueues a record only when its Seq exceeds
+	// this, so a record already in the replay is never also queued (no dup).
+	dbSince uint64
+	// dbClosed marks the queue permanently retired (sink loop drained on
+	// ctx-cancel or Close). Once set, a record that would have gone to the DB
+	// is a counted drop instead of silently vanishing into an orphaned queue.
+	dbClosed bool
+	closed   bool
 }
 
 // Handler is the fan-out root slog.Handler. The level floor is applied here
@@ -80,23 +88,31 @@ func (h *Handler) Handle(ctx context.Context, r slog.Record) error {
 
 	attrs, source := h.attrsJSON(r)
 	rec := Record{Time: r.Time, Level: r.Level, Source: source, Msg: r.Message, Attrs: attrs}
-	c.ring.Write(rec)
+	seq := c.ring.Write(rec)
 
+	// The DB send is done under c.mu (a non-blocking channel op that never
+	// blocks the lock) so it is mutually exclusive with AttachDB publishing
+	// the queue and with Close/ctx-cancel retiring it: a record either lands
+	// in the queue the sink loop still drains, or is a counted drop — never
+	// lost into an orphaned queue, and never duplicated into the replay.
 	c.mu.Lock()
 	extras := append([]*extraSink(nil), c.extras...)
-	dbQueue := c.dbQueue
-	c.mu.Unlock()
-
-	if dbQueue != nil {
+	switch {
+	case c.dbQueue != nil && seq > c.dbSince:
 		row := LogRow{Time: rec.Time, Level: int(rec.Level), Source: rec.Source, Msg: rec.Msg, Attrs: rec.Attrs}
 		select {
-		case dbQueue <- row:
+		case c.dbQueue <- row:
 		default:
 			// Sink slower than the log rate: drop rather than block a
 			// worker on log IO.
 			c.drops.Add(1)
 		}
+	case c.dbQueue == nil && c.dbClosed:
+		// A sink was attached but has been retired: count what it can no
+		// longer accept instead of dropping it uncounted.
+		c.drops.Add(1)
 	}
+	c.mu.Unlock()
 
 	if c.text != nil || len(extras) > 0 {
 		nr := h.slogRecord(r)
@@ -105,7 +121,10 @@ func (h *Handler) Handle(ctx context.Context, r slog.Record) error {
 		}
 		for _, x := range extras {
 			x.replay(ctx, c.ring)
-			if x.h.Enabled(ctx, nr.Level) {
+			// Only records newer than the extra's replay horizon are handled
+			// live; records at/below it were already delivered by the replay,
+			// so this avoids the attach-vs-Handle duplication.
+			if seq > x.upTo && x.h.Enabled(ctx, nr.Level) {
 				_ = x.h.Handle(ctx, nr)
 			}
 		}

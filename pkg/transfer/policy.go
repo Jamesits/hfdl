@@ -20,9 +20,14 @@ const (
 	emaAlpha = 0.2
 	// emaPenaltyFactor halves the EMA on stall/error.
 	emaPenaltyFactor = 0.5
-	// upstreamCooldownTTL parks a stalled/errored/429 upstream for this
-	// file; the next block goes elsewhere.
+	// upstreamCooldownTTL parks a 429/503 upstream for this file; the next
+	// block goes elsewhere.
 	upstreamCooldownTTL = 30 * time.Second
+	// upstreamBlacklistTTL is the shorter temporary park applied on a stall or
+	// generic transport/validation error (EMA *= 0.5, temporary
+	// blacklist TTL, next block goes elsewhere). Kept short so a transiently
+	// slow mirror recovers, unlike the 30s 429 cooldown.
+	upstreamBlacklistTTL = 5 * time.Second
 )
 
 // healthyLocked filters upstreams usable right now: not identity-excluded,

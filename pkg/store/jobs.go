@@ -57,10 +57,10 @@ func (s *Store) LeaseMeta(ctx context.Context, now time.Time) (*Repo, LeaseToken
 	repo := new(Repo)
 	err := claimOne(ctx, s.db, repo,
 		"UPDATE repos SET status = ?, lease_owner = ?, lease_token = ?, lease_until = ?, updated_at = ? "+
-			"WHERE id = (SELECT id FROM repos WHERE status = ? ORDER BY id LIMIT 1) AND status = ? "+
+			"WHERE id = (SELECT id FROM repos WHERE status = ? AND (available_at IS NULL OR available_at <= ?) ORDER BY id LIMIT 1) AND status = ? "+
 			"RETURNING *",
 		string(RepoListing), s.owner, string(tok), utc(now.Add(leaseDuration)), utc(now),
-		string(RepoPending), string(RepoPending))
+		string(RepoPending), utc(now), string(RepoPending))
 	if err != nil {
 		return nil, "", fmt.Errorf("store: lease meta: %w", err)
 	}
@@ -150,6 +150,18 @@ func (s *Store) FileJobFiles(ctx context.Context, fileID int64) ([]JobFile, erro
 // (pending → installing) and returns it with its file, job, and repo.
 // ErrNoWork when nothing is installable.
 func (s *Store) LeaseInstall(ctx context.Context, now time.Time) (*JobFile, *File, *Job, *Repo, LeaseToken, error) {
+	return s.leaseInstall(ctx, now, "")
+}
+
+// LeaseInstallMode is LeaseInstall restricted to jobs of a single destination
+// mode ("cache" | "local-dir"), so the scheduler can run a cheap symlink pool
+// (cache mode) and a separate duty-gated copy pool (local-dir) without cheap
+// installs starving behind long copies. Empty destMode leases any mode.
+func (s *Store) LeaseInstallMode(ctx context.Context, now time.Time, destMode string) (*JobFile, *File, *Job, *Repo, LeaseToken, error) {
+	return s.leaseInstall(ctx, now, destMode)
+}
+
+func (s *Store) leaseInstall(ctx context.Context, now time.Time, destMode string) (*JobFile, *File, *Job, *Repo, LeaseToken, error) {
 	var (
 		jf  *JobFile
 		f   *File
@@ -160,14 +172,24 @@ func (s *Store) LeaseInstall(ctx context.Context, now time.Time) (*JobFile, *Fil
 	err := s.inTx(ctx, "lease install", func(tx bun.Tx) error {
 		tok = newToken()
 		jf = new(JobFile)
+		sel := "SELECT jf.job_id, jf.file_id FROM job_files jf " +
+			"JOIN files f ON f.id = jf.file_id AND f.status = ? " +
+			"JOIN jobs jb ON jb.id = jf.job_id " +
+			"WHERE jf.status = ?"
+		args := []any{
+			string(JobFileInstalling), s.owner, string(tok), utc(now.Add(leaseDuration)), utc(now),
+			string(FileCached), string(JobFilePending),
+		}
+		if destMode != "" {
+			sel += " AND jb.dest_mode = ?"
+			args = append(args, destMode)
+		}
+		sel += " ORDER BY jf.job_id, jf.file_id LIMIT 1"
 		err := claimOne(ctx, tx, jf,
 			"UPDATE job_files SET status = ?, lease_owner = ?, lease_token = ?, lease_until = ?, updated_at = ? "+
-				"WHERE (job_id, file_id) = (SELECT jf.job_id, jf.file_id FROM job_files jf "+
-				"JOIN files f ON f.id = jf.file_id AND f.status = ? "+
-				"WHERE jf.status = ? ORDER BY jf.job_id, jf.file_id LIMIT 1) AND status = ? "+
+				"WHERE (job_id, file_id) = ("+sel+") AND status = ? "+
 				"RETURNING *",
-			string(JobFileInstalling), s.owner, string(tok), utc(now.Add(leaseDuration)), utc(now),
-			string(FileCached), string(JobFilePending), string(JobFilePending))
+			append(args, string(JobFilePending))...)
 		if err != nil {
 			return fmt.Errorf("store: lease install: %w", err)
 		}

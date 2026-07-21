@@ -3,6 +3,7 @@ package transfer
 import (
 	"encoding/binary"
 	"errors"
+	"math"
 	"math/rand/v2"
 	"reflect"
 	"testing"
@@ -181,6 +182,99 @@ func TestSerdeCorrupt(t *testing.T) {
 			}
 		})
 	}
+}
+
+// TestSerdeOverflow: a uvarint exceeding int64 range must be rejected, not
+// cast to a negative int64 that would wrap past the bounds/monotonicity checks
+// and silently accept a malformed blob.
+func TestSerdeOverflow(t *testing.T) {
+	build := func(size, delta, length uint64) []byte {
+		out := []byte("HFDP\x01")
+		out = binary.AppendUvarint(out, size)
+		out = binary.AppendUvarint(out, 1) // one interval
+		out = binary.AppendUvarint(out, delta)
+		out = binary.AppendUvarint(out, length)
+		return out
+	}
+	cases := []struct {
+		name                string
+		size, delta, length uint64
+	}{
+		{"size beyond int64", uint64(math.MaxInt64) + 1, 0, 10},
+		{"length beyond int64", 1 << 30, 0, uint64(math.MaxInt64) + 1},
+		{"delta beyond int64", 1 << 30, uint64(math.MaxInt64) + 1, 10},
+		{"start addition overflows", math.MaxInt64, math.MaxInt64, 1},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			var s IntervalSet
+			err := s.UnmarshalBinary(build(tc.size, tc.delta, tc.length))
+			var cpe *CorruptProgressError
+			if !errors.As(err, &cpe) {
+				t.Fatalf("overflow %q: err = %v, want *CorruptProgressError", tc.name, err)
+			}
+		})
+	}
+}
+
+// TestMarshalRejectsCorruptSet: MarshalBinary must never emit a blob its own
+// decoder would reject — a malformed in-memory set is caught at encode time.
+func TestMarshalRejectsCorruptSet(t *testing.T) {
+	cases := []struct {
+		name string
+		set  IntervalSet
+	}{
+		{"negative size", IntervalSet{size: -1}},
+		{"interval past size", IntervalSet{size: 100, iv: []Interval{{0, 200}}}},
+		{"overlapping", IntervalSet{size: 1000, iv: []Interval{{0, 100}, {50, 200}}}},
+		{"reversed", IntervalSet{size: 1000, iv: []Interval{{200, 100}}}},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			if _, err := tc.set.MarshalBinary(); err == nil {
+				t.Fatalf("MarshalBinary(%s) = nil error, want *CorruptProgressError", tc.name)
+			}
+		})
+	}
+}
+
+// FuzzSerdeRoundTrip: a random Add sequence round-trips to an identical set,
+// and arbitrary bytes never panic (or are accepted as) a corrupt decode.
+func FuzzSerdeRoundTrip(f *testing.F) {
+	f.Add(uint16(1000), uint32(0x00640096), uint16(0)) // one seed
+	f.Fuzz(func(t *testing.T, size uint16, adds uint32, _ uint16) {
+		if size == 0 {
+			size = 1
+		}
+		s := &IntervalSet{size: int64(size)}
+		// Derive a couple of in-bounds ranges from the fuzz inputs.
+		a := int64(adds & 0xffff)
+		b := int64((adds >> 16) & 0xffff)
+		lo, hi := min(a, b)%int64(size), max(a, b)%int64(size)
+		if lo < hi {
+			s.Add(lo, hi)
+		}
+		blob, err := s.MarshalBinary()
+		if err != nil {
+			return // an invalid set is a legitimate marshal rejection
+		}
+		var back IntervalSet
+		if uerr := back.UnmarshalBinary(blob); uerr != nil {
+			t.Fatalf("round-trip decode failed: %v", uerr)
+		}
+		if !s.equal(&back) {
+			t.Fatalf("round-trip mismatch: %v != %v", s.iv, back.iv)
+		}
+	})
+}
+
+// FuzzSerdeDecodeNoPanic: the decoder must never panic on arbitrary input.
+func FuzzSerdeDecodeNoPanic(f *testing.F) {
+	f.Add([]byte("HFDP\x01\xe8\x07\x01\x00\x64"))
+	f.Fuzz(func(t *testing.T, b []byte) {
+		var s IntervalSet
+		_ = s.UnmarshalBinary(b) // error is fine; a panic is not
+	})
 }
 
 // TestSerdeAdjacentDecodesCoalesced: the format can encode adjacent (but

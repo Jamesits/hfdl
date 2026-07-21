@@ -55,7 +55,7 @@ func TestStaleLeaseFencing(t *testing.T) {
 	if err != nil {
 		t.Fatalf("LeaseFileForDownload: %v", err)
 	}
-	if err := s.ReplacePendingBlocks(ctx, fileID, []Block{{Idx: 0, Offset: 0, Length: 200}}); err != nil {
+	if err := s.ReplacePendingBlocks(ctx, fileID, tokA, []Block{{Idx: 0, Offset: 0, Length: 200}}); err != nil {
 		t.Fatalf("ReplacePendingBlocks: %v", err)
 	}
 	leasedA, err := s.LeaseBlocks(ctx, 1, BlockFilter{FileIDs: []int64{fileID}}, now)

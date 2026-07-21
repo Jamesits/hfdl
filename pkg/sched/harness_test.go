@@ -284,6 +284,13 @@ func (h *fixtureHub) handleResolve(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Range", fmt.Sprintf("bytes %d-%d/%d", start, end, len(content)))
 		w.Header().Set("Content-Length", strconv.FormatInt(length, 10))
 		w.Header().Set("Content-Encoding", "identity")
+		// The response must still prove identity: a ranged 206 without a
+		// validator is a validation failure (never streamed), so a mid-body
+		// blackhole that omitted the ETag would be rejected before it could
+		// stall. Carry the matching blob ETag so this streams then stalls.
+		if f, ok := h.files[path]; ok {
+			w.Header().Set("ETag", `"`+f.blobID()+`"`)
+		}
 		w.WriteHeader(http.StatusPartialContent)
 		prefix := content[start:min(int64(len(content)), start+min(length, 16<<10))]
 		_, _ = w.Write(prefix)

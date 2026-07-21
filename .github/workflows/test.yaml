@@ -46,3 +46,44 @@ jobs:
         uses: golangci/golangci-lint-action@v9
         with:
           version: latest
+
+  # Cross-compile vet: the test job above runs native tests on
+  # linux/amd64, windows/amd64 and darwin/arm64, but build-tagged
+  # platform code (pkg/fcio, pkg/sched, pkg/store, pkg/cache, cmd) must
+  # compile cleanly on every GOOS/GOARCH we ship — including combos with
+  # no native runner (darwin/amd64, linux/arm64, windows/arm64). AGENTS.md
+  # requires `go vet` across the matrix.
+  vet:
+    name: Vet (${{ matrix.goos }}/${{ matrix.goarch }})
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    strategy:
+      fail-fast: false
+      matrix:
+        goos:
+          - linux
+          - windows
+          - darwin
+        goarch:
+          - amd64
+          - arm64
+    steps:
+      - name: Harden Runner
+        uses: step-security/harden-runner@bf7454d06d71f1098171f2acdf0cd4708d7b5920 # v2.20.0
+        with:
+          egress-policy: audit
+
+      - uses: actions/checkout@v7
+
+      - uses: actions/setup-go@v7
+        with:
+          go-version-file: 'go.mod'
+          cache: false
+
+      - run: go mod download
+
+      - name: go vet
+        env:
+          GOOS: ${{ matrix.goos }}
+          GOARCH: ${{ matrix.goarch }}
+        run: go vet ./...

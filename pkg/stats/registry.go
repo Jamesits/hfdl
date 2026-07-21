@@ -22,6 +22,7 @@ type fileEntry struct {
 	total atomic.Int64
 	conns atomic.Int64
 	ring  rateRing
+	ema   atomic.Uint64 // math.Float64bits of the per-file EMA rate estimate (α=0.2)
 
 	// live counts open connections per upstream on this file; an upstream
 	// stays listed until its last connection on the file ends.
@@ -34,6 +35,7 @@ type upstreamEntry struct {
 	bytes atomic.Int64
 	ema   atomic.Uint64 // math.Float64bits of the EMA rate estimate
 	conns atomic.Int64
+	ring  rateRing // per-upstream windowed byte rate (fed by AddUpstream)
 }
 
 // Registry is the process-wide statistics hub. Counters are atomic; the
@@ -49,6 +51,7 @@ type Registry struct {
 	stalls        atomic.Int64
 	retries       atomic.Int64
 	globalRing    rateRing
+	globalEMA     atomic.Uint64 // math.Float64bits of the global EMA rate estimate (α=0.2)
 
 	filesMu   sync.RWMutex
 	files     map[int64]*fileEntry
@@ -129,22 +132,40 @@ func (r *Registry) AddFile(fileID int64, n int64) {
 	f.ring.Add(r.nowSec(), n)
 }
 
-// AddUpstream records n bytes served by upstream.
+// AddUpstream records n bytes served by upstream and feeds its windowed rate
+// ring.
 func (r *Registry) AddUpstream(upstream string, n int64) {
-	r.upstream(upstream).bytes.Add(n)
+	u := r.upstream(upstream)
+	u.bytes.Add(n)
+	u.ring.Add(r.nowSec(), n)
 }
 
-// ReportUpstreamRate folds a fresh rate sample into the upstream's EMA
+// foldEMA folds a fresh rate sample into an EMA held as Float64bits
 // (ema = α·sample + (1-α)·ema, α=0.2). CAS loop, no lock.
-func (r *Registry) ReportUpstreamRate(upstream string, bps float64) {
-	u := r.upstream(upstream)
+func foldEMA(a *atomic.Uint64, sample float64) {
 	for {
-		old := u.ema.Load()
-		next := emaAlpha*bps + (1-emaAlpha)*math.Float64frombits(old)
-		if u.ema.CompareAndSwap(old, math.Float64bits(next)) {
+		old := a.Load()
+		next := emaAlpha*sample + (1-emaAlpha)*math.Float64frombits(old)
+		if a.CompareAndSwap(old, math.Float64bits(next)) {
 			return
 		}
 	}
+}
+
+// ReportUpstreamRate folds a fresh rate sample into the upstream's EMA and the
+// process-global EMA (both α=0.2). The upstream EMA is the upstream-policy
+// signal; the global EMA is the smoothed whole-run rate signal.
+func (r *Registry) ReportUpstreamRate(upstream string, bps float64) {
+	foldEMA(&r.upstream(upstream).ema, bps)
+	foldEMA(&r.globalEMA, bps)
+}
+
+// ReportFileRate folds a fresh whole-file rate sample into that file's EMA
+// (α=0.2). Callers with a per-file rate measurement (transfer's
+// reportRate) should call this so the per-file EMA is populated alongside the
+// per-upstream one.
+func (r *Registry) ReportFileRate(fileID int64, bps float64) {
+	foldEMA(&r.file(fileID).ema, bps)
 }
 
 // PenalizeUpstream halves the upstream's EMA (e.g. on stall/throttle).
@@ -171,23 +192,51 @@ func (r *Registry) ConnStart(fileID int64, upstream string) {
 	r.upstream(upstream).conns.Add(1)
 }
 
-// ConnEnd closes a connection opened by ConnStart. Calls must be paired per
-// (fileID, upstream); a ConnEnd for an unknown file or upstream is dropped
-// rather than recreating a removed entry.
-func (r *Registry) ConnEnd(fileID int64, upstream string) {
-	r.conns.Add(-1)
-	if f := r.fileIfExists(fileID); f != nil {
-		f.conns.Add(-1)
-		f.liveMu.Lock()
-		if n := f.live[upstream] - 1; n > 0 {
-			f.live[upstream] = n
-		} else {
-			delete(f.live, upstream)
-		}
-		f.liveMu.Unlock()
+// subClamp atomically subtracts delta from a, never dropping below 0, so an
+// unpaired or duplicate decrement can't drive a gauge negative.
+func subClamp(a *atomic.Int64, delta int64) {
+	if delta <= 0 {
+		return
 	}
+	for {
+		v := a.Load()
+		nv := v - delta
+		if nv < 0 {
+			nv = 0
+		}
+		if a.CompareAndSwap(v, nv) {
+			return
+		}
+	}
+}
+
+// ConnEnd closes a connection opened by ConnStart. Pairing is anchored on the
+// file's live-upstream map: an end is honored only when the file entry still
+// has a live connection for that upstream, so a duplicate/unpaired end (or one
+// whose file was already removed and reconciled) is dropped rather than
+// driving the global and upstream gauges negative.
+func (r *Registry) ConnEnd(fileID int64, upstream string) {
+	f := r.fileIfExists(fileID)
+	if f == nil {
+		return // file removed (already reconciled) or never started: drop
+	}
+	f.liveMu.Lock()
+	n := f.live[upstream]
+	if n <= 0 {
+		f.liveMu.Unlock()
+		return // unpaired end for this upstream: drop
+	}
+	if n == 1 {
+		delete(f.live, upstream)
+	} else {
+		f.live[upstream] = n - 1
+	}
+	f.liveMu.Unlock()
+
+	subClamp(&f.conns, 1)
+	subClamp(&r.conns, 1)
 	if u := r.upstreamIfExists(upstream); u != nil {
-		u.conns.Add(-1)
+		subClamp(&u.conns, 1)
 	}
 }
 
@@ -208,8 +257,32 @@ func (r *Registry) SetFileTotal(fileID int64, total int64) {
 
 // RemoveFile drops fileID's entry; the file finished and Snapshot should no
 // longer show it. Late adds for the same ID recreate a fresh entry.
+//
+// Connections still live on the removed file are reconciled here: their paired
+// ConnEnd (if it ever arrives) will find no entry and be dropped, so the
+// global and per-upstream gauges are decremented now by the removed entry's
+// live conn count — otherwise removing a file mid-transfer would strand those
+// gauges high forever.
 func (r *Registry) RemoveFile(fileID int64) {
 	r.filesMu.Lock()
+	f := r.files[fileID]
 	delete(r.files, fileID)
 	r.filesMu.Unlock()
+	if f == nil {
+		return
+	}
+	// Snapshot and clear the live map under its own lock so a ConnEnd racing
+	// the removal (holding the same f) either decrements before we clear it or
+	// finds it empty and drops — never both.
+	f.liveMu.Lock()
+	var total int64
+	for u, n := range f.live {
+		total += n
+		if up := r.upstreamIfExists(u); up != nil {
+			subClamp(&up.conns, n)
+		}
+	}
+	f.live = map[string]int64{}
+	f.liveMu.Unlock()
+	subClamp(&r.conns, total)
 }

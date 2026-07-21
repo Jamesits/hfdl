@@ -6,7 +6,6 @@ import (
 	"errors"
 	"fmt"
 	"sort"
-	"strings"
 
 	"github.com/jamesits/hfdl/pkg/config"
 	"github.com/jamesits/hfdl/pkg/hfapi"
@@ -284,15 +283,6 @@ func jsonOrEmpty(v []string) string {
 		return ""
 	}
 	return string(b)
-}
-
-// repoCacheDirName is the huggingface_hub cache directory name for a repo
-// (models--org--name); duplicated from pkg/cache where it is unexported.
-func repoCacheDirName(repoType, repo string) string {
-	if repoType == "" {
-		repoType = "model"
-	}
-	return repoType + "s--" + strings.ReplaceAll(repo, "/", "--")
 }
 
 // blobID is the cache key + verify target for a file row: SHA256 for LFS

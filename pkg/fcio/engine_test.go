@@ -155,21 +155,17 @@ func TestWriteUnalignedConcurrentNeighbors(t *testing.T) {
 	}
 }
 
-func TestReadAllInOrderDepthLimited(t *testing.T) {
+// TestReadAllFadviseSequential verifies the fadvise/plain ReadAll path: a
+// simple in-order sequential loop (no readahead goroutine pipeline — the
+// kernel reads ahead via FADV_SEQUENTIAL), so exactly one buffer is in flight
+// regardless of media class. The readahead pipeline is direct-tier only.
+func TestReadAllFadviseSequential(t *testing.T) {
 	rng := rand.New(rand.NewPCG(2, 0))
-	size := 4*readChunkSize + 12345 // 5 pipeline ops per pass
+	size := 4*readChunkSize + 12345 // several chunks per pass
 	content := make([]byte, size)
 	fillRandom(rng, content)
-	for _, tc := range []struct {
-		fs    FsType
-		depth int32
-	}{
-		{FsSSD, readDepthSSD},
-		{FsHDD, readDepthHDD},
-		{FsNetFS, readDepthNetFS},
-		{FsUnknown, readDepthUnknown},
-	} {
-		t.Run(tc.fs.String(), func(t *testing.T) {
+	for _, fs := range []FsType{FsSSD, FsHDD, FsNetFS, FsUnknown} {
+		t.Run(fs.String(), func(t *testing.T) {
 			path := filepath.Join(t.TempDir(), "f.bin")
 			if err := os.WriteFile(path, content, 0o644); err != nil {
 				t.Fatalf("seed: %v", err)
@@ -180,7 +176,7 @@ func TestReadAllInOrderDepthLimited(t *testing.T) {
 				t.Fatalf("open: %v", err)
 			}
 			defer f.Close()
-			f.fsType = tc.fs
+			f.fsType = fs
 			var got []byte
 			prevOff := int64(-1)
 			prevEnd := int64(0)
@@ -202,8 +198,8 @@ func TestReadAllInOrderDepthLimited(t *testing.T) {
 			if !bytes.Equal(got, content) {
 				t.Fatalf("content mismatch: got %d bytes, want %d", len(got), len(content))
 			}
-			if hw := f.maxInflight.Load(); hw != tc.depth {
-				t.Fatalf("pipeline high-water = %d, want depth %d", hw, tc.depth)
+			if hw := f.maxInflight.Load(); hw != 1 {
+				t.Fatalf("fadvise ReadAll high-water = %d, want 1 (sequential)", hw)
 			}
 		})
 	}

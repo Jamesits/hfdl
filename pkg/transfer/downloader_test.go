@@ -205,10 +205,16 @@ func TestDownloadAllRangelessFallback(t *testing.T) {
 
 	leaser := newMemLeaser(size, 64<<10)
 	d := testDownloader(t)
-	evs := &eventLog{}
+	// A consumer must drain the event stream so emit() never back-pressures,
+	// but the rangeless-event COUNT is deliberately not asserted: with two
+	// upstreams the number of EventRangeless (0, 1 or 2) depends on the
+	// concurrent interleaving of markRangeless vs. the all-rangeless→
+	// errAllRangeless transition, so any exact count is racy. The deterministic
+	// contract is what matters — the file still completes byte-correct and the
+	// fallback fetches it with a single unranged GET.
 	stop := make(chan struct{})
 	defer close(stop)
-	go evs.collect(d.Events(), stop)
+	go (&eventLog{}).collect(d.Events(), stop)
 	task := taskFor(leaser, size, s1.URL, s2.URL)
 	task.Conns = 2
 	sink := openSink(t, size)
@@ -217,9 +223,6 @@ func TestDownloadAllRangelessFallback(t *testing.T) {
 	}
 	if got := readSink(t, sink); string(got) != string(content) {
 		t.Fatal("content mismatch after fallback")
-	}
-	if evs.count(EventRangeless) < 2 {
-		t.Fatalf("rangeless events %d, want ≥2", evs.count(EventRangeless))
 	}
 	// Fallback fetched with an unranged GET.
 	var unranged int

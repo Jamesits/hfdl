@@ -100,14 +100,14 @@ func TestWriteModelTreeCache(t *testing.T) {
 		t.Errorf("model tree cache =\n%s\nwant\n%s", raw, want)
 	}
 	// Dataset repo type pluralizes to datasets--.
-	if got := modelDirName("dataset", "o/r"); got != "datasets--o--r" {
-		t.Errorf("modelDirName(dataset) = %q", got)
+	if got := ModelDirName("dataset", "o/r"); got != "datasets--o--r" {
+		t.Errorf("ModelDirName(dataset) = %q", got)
 	}
-	if got := modelDirName("space", "o/r"); got != "spaces--o--r" {
-		t.Errorf("modelDirName(space) = %q", got)
+	if got := ModelDirName("space", "o/r"); got != "spaces--o--r" {
+		t.Errorf("ModelDirName(space) = %q", got)
 	}
-	if got := modelDirName("", "o/r"); got != "models--o--r" {
-		t.Errorf("modelDirName(empty) = %q", got)
+	if got := ModelDirName("", "o/r"); got != "models--o--r" {
+		t.Errorf("ModelDirName(empty) = %q", got)
 	}
 }
 

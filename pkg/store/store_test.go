@@ -83,7 +83,7 @@ func leaseFile(t *testing.T, s *Store, fileID int64, nblocks int) LeaseToken {
 	for i := range blocks {
 		blocks[i] = Block{Idx: i, Offset: int64(i) * 100, Length: 100}
 	}
-	if err := s.ReplacePendingBlocks(t.Context(), fileID, blocks); err != nil {
+	if err := s.ReplacePendingBlocks(t.Context(), fileID, tok, blocks); err != nil {
 		t.Fatalf("ReplacePendingBlocks: %v", err)
 	}
 	return tok

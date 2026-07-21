@@ -48,12 +48,18 @@ func (in *Installer) writeLocalDirStamps(destDir, repoPath string) error {
 		return err
 	}
 
-	lockPath, err := SafeJoin(filepath.Join(cacheDir, "download"), repoPath+".lock")
+	lockPath, err := SafeJoinContent(filepath.Join(cacheDir, "download"), repoPath+".lock")
 	if err != nil {
 		return err
 	}
-	if err := os.MkdirAll(filepath.Dir(lockPath), 0o755); err != nil {
+	lockDir := filepath.Dir(lockPath)
+	if err := os.MkdirAll(lockDir, 0o755); err != nil {
 		return fmt.Errorf("cache: create lock dir: %w", err)
 	}
-	return createEmptyFile(lockPath)
+	if err := createEmptyFile(lockPath); err != nil {
+		return err
+	}
+	// Namespace durability: fsync the download/ subtree parent so the freshly
+	// created lock entry survives a crash.
+	return in.fsyncDirFn(lockDir)
 }

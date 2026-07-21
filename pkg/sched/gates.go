@@ -3,6 +3,7 @@ package sched
 import (
 	"context"
 	"fmt"
+	"math/rand/v2"
 	"sync"
 	"time"
 
@@ -140,23 +141,32 @@ func (m *Manager) setCooldown(ctx context.Context, endpoint, kind string, retryA
 	return m.st.SetCooldown(ctx, endpoint, kind, until, reason)
 }
 
-// cooldownBackoff is the jittered exp-backoff ladder for cooldowns without
-// a server hint: 1s→5m, ±20% jitter.
+// cooldownBackoff is the jittered exp-backoff ladder for cooldowns without a
+// server hint: 1s→5m, ±20% random jitter. Randomness (not the old
+// attempt-derived 3-value cycle) desynchronizes endpoints that hit the same
+// attempt number, avoiding a thundering-herd of simultaneous retries.
 func cooldownBackoff(attempt int) time.Duration {
 	d := time.Second << uint(min(attempt, 9))
 	if d > 5*time.Minute {
 		d = 5 * time.Minute
 	}
-	// Deterministic ±20% jitter derived from the attempt number (no rng
-	// state to carry; tests stay reproducible).
-	jitter := time.Duration(int64(d) / 5 * int64((attempt%3)-1))
-	return d + jitter
+	return jittered(d)
+}
+
+// jittered applies ±20% uniform random jitter to d (thundering-herd spread).
+func jittered(d time.Duration) time.Duration {
+	if d <= 0 {
+		return d
+	}
+	return d + time.Duration((rand.Float64()*0.4-0.2)*float64(d))
 }
 
 // OutOfSpaceError is terminal: the write probe kept failing after the
 // configured bound, so disk-full is not transient (statfs-free was
 // assumed to correlate with writability; quota/cgroup limits break
-// that).
+// that). This bounded give-up is a deliberate hfdl safety extension beyond
+// pause/poll/resume: without it a permanently-full quota would pause
+// the run forever. It is surfaced as an explicit error, never a silent hang.
 type OutOfSpaceError struct {
 	Dir    string
 	Probes int
@@ -172,8 +182,10 @@ const (
 	// (a reservation quota that rejects the real allocation rejects only
 	// a demand-honest probe).
 	probeMinBytes = 4 << 20
-	// probeGiveUpDefault bounds consecutive failed probes before the
-	// pause escalates to terminal job errors.
+	// probeGiveUpDefault bounds consecutive failed probes before the pause
+	// escalates to terminal job errors (see OutOfSpaceError: a deliberate
+	// safety bound so a permanently-full quota fails loudly, not silently
+	// forever).
 	probeGiveUpDefault = 100
 	// probeBackoffMax caps the probe poll cadence (1s→30s, ±20% jitter).
 	probeBackoffMax = 30 * time.Second
@@ -202,17 +214,23 @@ func (m *Manager) noteIOErrorAt(ctx context.Context, err error, dir string, dema
 	if demand < enospcResumeBytes {
 		demand = enospcResumeBytes
 	}
+	// Compare-and-start under enospcMu so exactly one watcher launches: two IO
+	// failures racing here would otherwise both see the episode inactive and
+	// both spawn a watcher.
+	m.enospcMu.Lock()
 	if m.enospc.active() {
 		// Mid-episode larger demand: raise the watermark so the resume
 		// proof covers it.
 		if demand > m.enospcDemand {
 			m.enospcDemand = demand
 		}
+		m.enospcMu.Unlock()
 		return true
 	}
 	m.enospcDemand = demand
 	m.enospcDir = dir
 	m.enospc.set(true)
+	m.enospcMu.Unlock()
 	m.log.Warn("out of disk space; pausing download and install queues",
 		"err", err, "dir", dir, "demand", demand)
 	m.wg.Add(1)
@@ -223,13 +241,30 @@ func (m *Manager) noteIOErrorAt(ctx context.Context, err error, dir string, dema
 	return true
 }
 
+// endEpisode lifts the ENOSPC pause under enospcMu (paired with the
+// compare-and-start in noteIOErrorAt).
+func (m *Manager) endEpisode() {
+	m.enospcMu.Lock()
+	m.enospc.set(false)
+	m.enospcMu.Unlock()
+}
+
+// enospcDemandNow reads the current (possibly raised) demand under the lock.
+func (m *Manager) enospcDemandNow() int64 {
+	m.enospcMu.Lock()
+	defer m.enospcMu.Unlock()
+	return m.enospcDemand
+}
+
 // enospcWatcher polls until writability is PROVEN — statfs free above the
 // recorded demand plus a successful write probe in the failure directory —
 // then lifts the pause. Probe failures back off (1s→30s, jittered) and
 // escalate terminally after the bound: a quota that keeps rejecting writes
 // is not a transient condition.
 func (m *Manager) enospcWatcher(ctx context.Context) {
+	m.enospcMu.Lock()
 	dir := m.enospcDir
+	m.enospcMu.Unlock()
 	giveUp := m.probeGiveUpLimit
 	if giveUp <= 0 {
 		giveUp = probeGiveUpDefault
@@ -249,25 +284,26 @@ func (m *Manager) enospcWatcher(ctx context.Context) {
 	}
 	failures := 0
 	for {
-		sleep := backoff + time.Duration(int64(backoff)/5*int64((failures%3)-1))
+		sleep := jittered(backoff)
 		select {
 		case <-ctx.Done():
-			m.enospc.set(false)
+			m.endEpisode()
 			return
 		case <-time.After(sleep):
 		}
 
+		demand := m.enospcDemandNow()
 		writable := false
 		free, err := m.statfsFreeFn(ctx, dir)
 		switch {
 		case err != nil:
 			m.log.Debug("statfs during ENOSPC pause failed", "err", err)
-		case free < m.enospcDemand:
-			m.log.Debug("free space still below demand", "free", free, "demand", m.enospcDemand)
+		case free < demand:
+			m.log.Debug("free space still below demand", "free", free, "demand", demand)
 		default:
 			// Demand-honest probe: on reservation filesystems only a
 			// demand-sized fallocate proves the real write would succeed.
-			size := max(m.enospcDemand, probeMinBytes)
+			size := max(demand, probeMinBytes)
 			if perr := m.probeFn(ctx, dir, size); perr != nil {
 				failures++
 				if failures%10 == 0 {
@@ -282,7 +318,7 @@ func (m *Manager) enospcWatcher(ctx context.Context) {
 
 		if writable {
 			m.log.Info("disk writability proven; resuming queues", "free", free, "dir", dir)
-			m.enospc.set(false)
+			m.endEpisode()
 			wake(m.wakeDownload)
 			wake(m.wakeInstall)
 			return
@@ -318,7 +354,7 @@ func (m *Manager) enospcGiveUp(ctx context.Context, dir string, probes int) {
 			m.log.Warn("finish job during ENOSPC give-up failed", "job_id", id, "err", ferr)
 		}
 	}
-	m.enospc.set(false)
+	m.endEpisode()
 	wake(m.wakeDownload)
 	wake(m.wakeInstall)
 }

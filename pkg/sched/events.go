@@ -2,7 +2,8 @@ package sched
 
 import (
 	"context"
-	"strings"
+	"errors"
+	"net/http"
 	"time"
 
 	"github.com/jamesits/hfdl/pkg/transfer"
@@ -30,6 +31,12 @@ func (m *Manager) eventPump(ctx context.Context) {
 
 func (m *Manager) handleEvent(ctx context.Context, ev transfer.Event) {
 	switch ev.Kind {
+	case transfer.EventBlockDone:
+		// Network bytes on the shared hfdl.download.bytes counter (kind=network);
+		// the disk queue tallies kind=salvage separately.
+		if ev.Bytes > 0 {
+			m.salvageBytes.Add(ctx, ev.Bytes, networkAttr)
+		}
 	case transfer.EventStall:
 		m.stalls.Add(ctx, 1, upstreamAttr(ev.Upstream))
 		m.log.Info("stall kill",
@@ -52,29 +59,28 @@ func (m *Manager) handleEvent(ctx context.Context, ev transfer.Event) {
 	}
 }
 
-// maybeCooldownUpstream persists a download-side 429/503 as an
-// upstream-level cooldown (distinct from the endpoint_cooldowns api/cas
-// gates).
+// maybeCooldownUpstream persists a download-side 429/503 as an upstream-level
+// cooldown (distinct from the endpoint_cooldowns api/cas gates). It reads the
+// typed *transfer.AttemptError status and Retry-After rather than string-
+// matching the error text — a 5xx that happened to contain "503" in a URL, or
+// a 429 whose text was reworded, are no longer mis-/under-classified — and it
+// honors the server's Retry-After when present.
 func (m *Manager) maybeCooldownUpstream(ctx context.Context, ev transfer.Event) {
 	if ev.Err == nil || ev.Upstream == "" {
 		return
 	}
-	msg := ev.Err.Error()
-	var is429, is503 bool
-	for _, tok := range []string{"429", "Too Many Requests"} {
-		if strings.Contains(msg, tok) {
-			is429 = true
-		}
-	}
-	for _, tok := range []string{"503", "Service Unavailable"} {
-		if strings.Contains(msg, tok) {
-			is503 = true
-		}
-	}
-	if !is429 && !is503 {
+	var ae *transfer.AttemptError
+	if !errors.As(ev.Err, &ae) {
 		return
 	}
-	until := m.nowFn().Add(upstreamCooldown)
+	if ae.StatusCode != http.StatusTooManyRequests && ae.StatusCode != http.StatusServiceUnavailable {
+		return
+	}
+	d := ae.RetryAfter
+	if d <= 0 {
+		d = upstreamCooldown
+	}
+	until := m.nowFn().Add(d)
 	if err := m.st.UpdateUpstream(ctx, ev.Upstream, 0, false, &until, nil); err != nil {
 		m.log.Debug("persist upstream cooldown failed", "upstream", ev.Upstream, "err", err)
 	}

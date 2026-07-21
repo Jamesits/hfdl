@@ -20,11 +20,15 @@ const (
 // DeSparse guarantees blob density: first a bare fallocate(0, size) which
 // converts holes to allocated unwritten extents with no data IO; on
 // ENOSYS/EOPNOTSUPP/EINVAL (tier-B volumes) a SEEK_DATA/SEEK_HOLE walk
-// zero-fills each gap through the pool's shared ZeroBuf. The walk is real
-// disk IO, so it checkpoints the disk DutyLimiter per slab. Windows sparse
-// attribute clearing is fcio's concern, not this package's.
+// zero-fills each gap from the pool's pre-zeroed slab (a fresh read-only
+// ZeroSlice per chunk, never mutating shared state). The walk is real disk
+// IO, so it checkpoints the disk DutyLimiter per slab. Windows
+// sparse-attribute clearing is handled by the cross-platform fcio path, not
+// here. The de-sparse method and hole byte count are reported on the trace
+// span.
 //
-// fsync ordering is the caller's job: fsync → de-sparse → fsync → hash.
+// fsync ordering is owned by the disk-queue caller, not this method
+// (fsync → de-sparse → fsync → hash); DeSparse deliberately does no fsync.
 func (c *Checker) DeSparse(ctx context.Context, f *fcio.File, size int64) (method string, holeBytes int64, err error) {
 	ctx, span := c.tracer.Start(ctx, "verify.desparse")
 	defer span.End()
@@ -48,6 +52,9 @@ func (c *Checker) deSparse(ctx context.Context, f *fcio.File, size int64) (strin
 	err := c.fallocateFn(f, size)
 	switch {
 	case err == nil:
+		if derr := f.Densify(); derr != nil {
+			return "", 0, fmt.Errorf("verify: desparse densify %s: %w", f.Path(), derr)
+		}
 		return methodFallocate, 0, nil
 	case !fallocateUnsupported(err):
 		return "", 0, fmt.Errorf("verify: desparse fallocate %s: %w", f.Path(), err)
@@ -63,14 +70,15 @@ func (c *Checker) deSparse(ctx context.Context, f *fcio.File, size int64) (strin
 	if err != nil {
 		return "", 0, fmt.Errorf("verify: desparse extents %s: %w", f.Path(), err)
 	}
-	zero := c.p.ZeroBuf()
 	slab := c.p.SlabSize()
 	var calc throttle.DutyCalc
 	var holeBytes int64
 	fill := func(start, end int64) error {
 		for off := start; off < end; {
 			n := min(slab, end-off)
-			zero.SetLen(int(n))
+			// Fresh read-only zero view per chunk — no SetLen on a shared buf,
+			// so concurrent de-sparse walks never race on one fill length.
+			zero := c.p.ZeroSlice(int(n))
 			if werr := f.WriteAt(zero, off); werr != nil {
 				// Gap boundaries are page-aligned on Linux, but a fragment
 				// that still misses the direct-tier alignment rule goes
@@ -112,6 +120,12 @@ func (c *Checker) deSparse(ctx context.Context, f *fcio.File, size int64) (strin
 		if err := fill(pos, size); err != nil {
 			return "", 0, err
 		}
+	}
+	// Now physically dense: strip any platform sparse attribute (Windows
+	// FSCTL_SET_SPARSE=FALSE + fsync; no-op elsewhere) so the finished blob is
+	// an ordinary non-sparse file.
+	if derr := f.Densify(); derr != nil {
+		return "", 0, fmt.Errorf("verify: desparse densify %s: %w", f.Path(), derr)
 	}
 	return methodWalk, holeBytes, nil
 }

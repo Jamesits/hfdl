@@ -1,8 +1,6 @@
 package tui
 
 import (
-	"log/slog"
-
 	tea "github.com/charmbracelet/bubbletea"
 )
 
@@ -24,12 +22,14 @@ func (m model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	return m.handleDashboardKey(msg)
 }
 
-// switchTab toggles tabs. Entering the logs tab snapshots the WARN+ count so
-// the dashboard badge afterwards only reports records the user has not seen.
+// switchTab toggles tabs. Entering the logs tab snapshots the cumulative
+// WARN+ total so the dashboard badge afterwards only reports records the user
+// has not seen — using WarnTotal (monotonic) keeps the baseline valid even
+// after the ring evicts records the user did see.
 func (m *model) switchTab() {
 	if m.tab == tabDashboard {
 		if m.ring != nil {
-			m.warnBaseline = m.ring.Count(slog.LevelWarn)
+			m.warnBaseline = m.ring.WarnTotal()
 		}
 		m.tab = tabLogs
 		return

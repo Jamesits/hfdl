@@ -34,30 +34,62 @@ type Source struct {
 	size   int64
 	route  string // token refresh route (from hfapi XetFileData)
 
-	mu         sync.Mutex
-	recon      *reconstruction
+	mu    sync.Mutex
+	recon *reconstruction
+	// gen is bumped every time recon is (re)fetched. A caller that 403'd on
+	// generation g asks reacquire to refresh only if s.gen is still g; if a
+	// concurrent refresher already advanced it, the caller retries against the
+	// fresh URL without spending its own reacquire budget — true single-flight.
+	gen        int
 	reacquires int
+	// fetchWait guards an in-flight reconstruction fetch (Prepare or
+	// reacquire): it is non-nil while a fetch runs and is closed on
+	// completion, so concurrent callers coalesce onto the one fetch instead of
+	// each issuing their own.
+	fetchWait chan struct{}
 }
 
 // Prepare fetches the file's full reconstruction (v2 with /v1 fallback).
-// Idempotent: a prepared Source is not re-fetched (reacquires during Open
-// go through reacquire()).
+// Idempotent and concurrently coalesced: a prepared Source is not re-fetched,
+// and two concurrent first Prepares issue a single fetch (one leads, the rest
+// wait on fetchWait). Reacquires during Open go through reacquire().
 func (s *Source) Prepare(ctx context.Context) error {
 	s.mu.Lock()
-	if s.recon != nil {
-		s.mu.Unlock()
-		return nil
+	for {
+		if s.recon != nil {
+			s.mu.Unlock()
+			return nil
+		}
+		if s.fetchWait != nil {
+			ch := s.fetchWait
+			s.mu.Unlock()
+			select {
+			case <-ctx.Done():
+				return ctx.Err()
+			case <-ch:
+			}
+			s.mu.Lock()
+			continue
+		}
+		break
 	}
+	ch := make(chan struct{})
+	s.fetchWait = ch
 	s.mu.Unlock()
 
 	recon, err := s.client.fetchReconstruction(ctx, s.route, s.fileID, nil)
-	if err != nil {
-		return err
-	}
+
 	s.mu.Lock()
-	s.recon = recon
+	s.fetchWait = nil
+	close(ch)
+	// Don't clobber a reconstruction a concurrent reacquire may have published
+	// while this leader was fetching.
+	if err == nil && s.recon == nil {
+		s.recon = recon
+		s.gen++
+	}
 	s.mu.Unlock()
-	return nil
+	return err
 }
 
 func (s *Source) current() *reconstruction {
@@ -66,12 +98,25 @@ func (s *Source) current() *reconstruction {
 	return s.recon
 }
 
+// reconAndGen returns the current reconstruction together with its generation,
+// so a fetch racing a reacquire can bind the URL it uses to a generation.
+func (s *Source) reconAndGen() (*reconstruction, int) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.recon, s.gen
+}
+
 // Boundaries snaps block edges to term boundaries: fetched xorb bytes are
-// not file bytes, so reconstruction must start and end at term edges. Each
-// missing interval is split at the next term file-end edge and at the blockSize
-// grid, so no returned interval crosses a term boundary and none exceeds
-// blockSize. transfer chunks these at blockSize afterwards; for snapped
-// xet intervals that chunking is a no-op. Without a reconstruction the
+// not file bytes, so a whole term is decoded to yield any of its bytes and a
+// block should own whole terms. The LEADING edge of each missing interval is
+// snapped down to the enclosing term's fileStart (so a block starts on a term
+// boundary — the head bytes it pulls in are decoded from that same term
+// regardless), clamped to the previous missing interval's end so the snap
+// never reaches back over bytes already present from an earlier gap. The
+// interior/forward edges are split at the next term file-end and at the
+// blockSize grid, so no returned interval crosses a term boundary and none
+// exceeds blockSize. transfer chunks these at blockSize afterwards; for
+// snapped xet intervals that chunking is a no-op. Without a reconstruction the
 // intervals pass through unchanged (identity, like httpSource).
 func (s *Source) Boundaries(missing []transfer.Interval, blockSize int64) []transfer.Interval {
 	recon := s.current()
@@ -79,8 +124,13 @@ func (s *Source) Boundaries(missing []transfer.Interval, blockSize int64) []tran
 		return missing
 	}
 	var out []transfer.Interval
+	var prevEnd int64 // end of the previous missing interval; leading-edge snap floor
 	for _, m := range missing {
-		for p := m.Start; p < m.End; {
+		start := recon.termStartAt(m.Start)
+		if start < prevEnd {
+			start = prevEnd
+		}
+		for p := start; p < m.End; {
 			edge := m.End
 			if te := recon.nextTermEdge(p); te > p && te < edge {
 				edge = te
@@ -93,6 +143,7 @@ func (s *Source) Boundaries(missing []transfer.Interval, blockSize int64) []tran
 			out = append(out, transfer.Interval{Start: p, End: edge})
 			p = edge
 		}
+		prevEnd = m.End
 	}
 	return out
 }
@@ -111,6 +162,17 @@ func (r *reconstruction) nextTermEdge(pos int64) int64 {
 	return r.terms[i].fileEnd
 }
 
+// termStartAt returns the fileStart of the term covering pos, or pos itself
+// when pos precedes all terms or falls in a gap (defensive; a valid
+// reconstruction tiles the file contiguously).
+func (r *reconstruction) termStartAt(pos int64) int64 {
+	i := sort.Search(len(r.terms), func(i int) bool { return r.terms[i].fileEnd > pos })
+	if i >= len(r.terms) || r.terms[i].fileStart > pos {
+		return pos
+	}
+	return r.terms[i].fileStart
+}
+
 // Open streams decoded file bytes of [off, off+length). The returned reader
 // is backed by a producer goroutine; Close (or ctx cancel) unblocks it.
 func (s *Source) Open(ctx context.Context, off, length int64) (io.ReadCloser, error) {
@@ -118,8 +180,11 @@ func (s *Source) Open(ctx context.Context, off, length int64) (io.ReadCloser, er
 	if recon == nil {
 		return nil, ErrNotPrepared
 	}
-	if off < 0 || length < 0 || off+length > s.size {
-		return nil, fmt.Errorf("xet: open range [%d,%d) outside file size %d: %w", off, off+length, s.size, ErrRangeNotSatisfiable)
+	// Overflow-safe bounds check: off+length can overflow int64 (e.g. a huge
+	// length), so never form the sum in the comparison — check each side
+	// against size instead.
+	if off < 0 || length < 0 || off > s.size || length > s.size-off {
+		return nil, fmt.Errorf("xet: open range off=%d length=%d outside file size %d: %w", off, length, s.size, ErrRangeNotSatisfiable)
 	}
 	pr, pw := io.Pipe()
 	go s.stream(ctx, off, off+length, pw)
@@ -274,16 +339,19 @@ func (s *Source) fetchSerialized(ctx context.Context, xorb string, e fetchRange)
 // after which the equivalent entry (same xorb + chunk range) is re-fetched
 // under its fresh URL.
 func (s *Source) fetchRangeHTTP(ctx context.Context, xorb string, e fetchRange) ([]byte, error) {
+	_, gen := s.reconAndGen()
 	for {
 		b, forbidden, err := s.client.getSignedRange(ctx, e)
 		if !forbidden {
 			return b, err
 		}
 		s.log.Info("presigned URL rejected, reacquiring reconstruction", "xorb", xorb, "range", fmt.Sprintf("%d-%d", e.chunkStart, e.chunkEnd))
-		if rerr := s.reacquire(ctx); rerr != nil {
+		if rerr := s.reacquire(ctx, gen); rerr != nil {
 			return nil, rerr
 		}
-		e2, ok := s.locateEntry(xorb, e.chunkStart, e.chunkEnd)
+		var recon *reconstruction
+		recon, gen = s.reconAndGen()
+		e2, ok := locateEntry(recon, xorb, e.chunkStart, e.chunkEnd)
 		if !ok {
 			return nil, &DataError{
 				Xorb:   xorb,
@@ -294,10 +362,8 @@ func (s *Source) fetchRangeHTTP(ctx context.Context, xorb string, e fetchRange) 
 	}
 }
 
-// locateEntry finds the fetch entry for (xorb, chunkStart, chunkEnd) in the
-// current (post-reacquire) reconstruction.
-func (s *Source) locateEntry(xorb string, start, end uint32) (fetchRange, bool) {
-	recon := s.current()
+// locateEntry finds the fetch entry for (xorb, chunkStart, chunkEnd) in recon.
+func locateEntry(recon *reconstruction, xorb string, start, end uint32) (fetchRange, bool) {
 	for _, e := range recon.fetch[xorb] {
 		if e.chunkStart == start && e.chunkEnd == end {
 			return e, true
@@ -306,39 +372,88 @@ func (s *Source) locateEntry(xorb string, start, end uint32) (fetchRange, bool) 
 	return fetchRange{}, false
 }
 
-// reacquire refreshes the file's reconstruction under a shared, bounded
-// budget with backoff; the mutex serializes concurrent refreshers into an
-// implicit single-flight.
-func (s *Source) reacquire(ctx context.Context) error {
+// reacquire refreshes the file's reconstruction under a shared, bounded budget
+// with backoff. failedGen is the generation the caller's 403'd URL came from:
+// if the reconstruction has already advanced past it (a concurrent 403 already
+// triggered a refresh), reacquire returns nil without spending budget so the
+// caller simply retries the fresh URL. Otherwise this call either leads the
+// single-flight refresh or coalesces onto one already in flight — so a burst
+// of concurrent 403s costs at most one budget unit, not one per caller.
+func (s *Source) reacquire(ctx context.Context, failedGen int) error {
 	s.mu.Lock()
-	defer s.mu.Unlock()
+	for {
+		if s.gen > failedGen {
+			s.mu.Unlock()
+			return nil
+		}
+		if s.fetchWait != nil {
+			ch := s.fetchWait
+			s.mu.Unlock()
+			select {
+			case <-ctx.Done():
+				return ctx.Err()
+			case <-ch:
+			}
+			s.mu.Lock()
+			continue
+		}
+		break
+	}
 	if s.reacquires >= maxReacquires {
+		s.mu.Unlock()
 		return &ReacquireError{Attempts: s.reacquires}
 	}
 	n := s.reacquires
 	s.reacquires++
-	backoff := reacquireBaseBackoff << n
-	timer := time.NewTimer(backoff)
-	select {
-	case <-ctx.Done():
-		timer.Stop()
-		return ctx.Err()
-	case <-timer.C:
-	}
-	recon, err := s.client.fetchReconstruction(ctx, s.route, s.fileID, nil)
+	ch := make(chan struct{})
+	s.fetchWait = ch
+	s.mu.Unlock()
+
+	// Backoff and fetch run OUTSIDE the lock so coalesced waiters and other
+	// blocks' Opens are not serialized behind the sleep.
+	recon, err := s.backoffFetch(ctx, n)
+
+	s.mu.Lock()
+	s.fetchWait = nil
+	close(ch)
 	if err != nil {
+		s.mu.Unlock()
 		return err
 	}
 	s.recon = recon
+	s.gen++
 	s.log.Debug("reconstruction reacquired", "file", s.fileID, "attempt", n+1,
 		"terms", len(recon.terms), "ranges", logging.JSONValue(termRanges(recon)))
+	s.mu.Unlock()
 	return nil
+}
+
+// backoffFetch sleeps the nth exponential backoff then fetches a fresh
+// reconstruction; ctx cancellation aborts the wait.
+func (s *Source) backoffFetch(ctx context.Context, n int) (*reconstruction, error) {
+	timer := time.NewTimer(reacquireBaseBackoff << n)
+	defer timer.Stop()
+	select {
+	case <-ctx.Done():
+		return nil, ctx.Err()
+	case <-timer.C:
+	}
+	return s.client.fetchReconstruction(ctx, s.route, s.fileID, nil)
 }
 
 // getSignedRange performs one presigned range GET. forbidden=true flags a
 // 403 (caller reacquires). 429 is mapped to *hfapi.RateLimitError like CAS
 // 429s — sched owns the cooldown either way.
 func (c *Client) getSignedRange(ctx context.Context, e fetchRange) (b []byte, forbidden bool, err error) {
+	// Validate the authorized range before building the request: a
+	// non-negative, non-empty byte span mapped to a non-empty chunk range.
+	// A malformed entry (from a buggy/corrupt reconstruction) would otherwise
+	// produce a nonsense Range header and an opaque server error.
+	if e.byteStart < 0 || e.byteEnd < e.byteStart || e.chunkStart >= e.chunkEnd {
+		return nil, false, &DataError{
+			Reason: fmt.Sprintf("invalid signed range: bytes [%d,%d] chunks [%d,%d)", e.byteStart, e.byteEnd, e.chunkStart, e.chunkEnd),
+		}
+	}
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, e.url, nil)
 	if err != nil {
 		return nil, false, fmt.Errorf("xet: build signed range request: %w", err)
@@ -354,7 +469,7 @@ func (c *Client) getSignedRange(ctx context.Context, e fetchRange) (b []byte, fo
 	case http.StatusForbidden:
 		return nil, true, nil
 	case http.StatusTooManyRequests:
-		return nil, false, &hfapi.RateLimitError{RetryAfter: parseRetryAfter(resp.Header.Get("Retry-After"))}
+		return nil, false, &hfapi.RateLimitError{RetryAfter: hfapi.ParseRetryAfter(resp.Header.Get("Retry-After"))}
 	default:
 		body, _ := io.ReadAll(io.LimitReader(resp.Body, maxErrorBody))
 		return nil, false, fmt.Errorf("xet: signed range GET: unexpected status %s: %s", resp.Status, string(body))

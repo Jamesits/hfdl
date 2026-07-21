@@ -11,10 +11,11 @@ import (
 const windowSecs = 10
 
 // windowRing is a fixed ring of per-second atomic counters, lazily advanced
-// on read (no background goroutine). Writes landing exactly on a second
-// rollover race the slot reset and may be dropped; that is accepted for a
-// UI/metrics stat and documented here rather than paid for with a lock on
-// the hot path.
+// on read (no background goroutine). A write racing a second-rollover of its
+// slot is *dropped*, never mis-attributed to the new second: Add re-checks the
+// slot's epoch after recording and backs its increment out if the slot rolled
+// underneath it. Dropping a boundary sample is acceptable for a UI/metrics
+// stat and avoids paying for a lock on the hot path.
 type windowRing struct {
 	slots [windowSecs]struct {
 		epoch atomic.Int64 // unix second this slot currently counts
@@ -33,18 +34,37 @@ func newWindowRing(counters int) *windowRing {
 }
 
 // Add records v into counter idx of t's second slot, claiming the slot on
-// rollover.
+// rollover. It guards against a concurrent rollover zeroing the slot between
+// the epoch check and the Add — which would otherwise mis-attribute v to the
+// new second: after adding, it re-reads the epoch and, if the slot no longer
+// owns ep, backs the increment out and re-decides (a stale second is dropped;
+// a backwards clock reclaims the slot).
 func (r *windowRing) Add(t time.Time, idx int, v int64) {
 	ep := t.Unix()
 	s := &r.slots[ep%windowSecs]
-	if old := s.epoch.Load(); old != ep {
-		if s.epoch.CompareAndSwap(old, ep) {
+	for {
+		old := s.epoch.Load()
+		switch {
+		case old == ep:
+			// slot already owns our second
+		case old < ep:
+			if !s.epoch.CompareAndSwap(old, ep) {
+				continue // lost the rollover CAS; re-read and retry
+			}
 			for i := range s.vals {
 				s.vals[i].Store(0)
 			}
+		default: // old > ep: our second already rolled out of this slot; drop.
+			return
 		}
+		s.vals[idx].Add(v)
+		if s.epoch.Load() == ep {
+			return
+		}
+		// A concurrent rollover zeroed the slot after our check: undo and
+		// re-decide against the slot's new epoch.
+		s.vals[idx].Add(-v)
 	}
-	s.vals[idx].Add(v)
 }
 
 // Sum totals counter idx over the window (now-windowSecs, now], by wall

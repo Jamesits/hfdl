@@ -104,7 +104,13 @@ type reconstruction struct {
 // The first term's decoded bytes start offsetFirst bytes BEFORE base (for
 // partial queries the first term covers bytes preceding the requested
 // range), so decoded offsets address true file positions.
-func normalize(version int, base int64, offsetFirst int64, terms []termJSON, fetch map[string][]fetchRange) *reconstruction {
+//
+// It validates the invariants a well-formed reconstruction must satisfy —
+// non-empty chunk ranges, positive unpacked lengths, a non-negative first-term
+// file offset, and fetch info that fully covers every term's chunk range —
+// rejecting a malformed CAS response with a DataError rather than surfacing it
+// later as a mid-stream decode failure.
+func normalize(version int, base int64, offsetFirst int64, terms []termJSON, fetch map[string][]fetchRange) (*reconstruction, error) {
 	r := &reconstruction{
 		version:              version,
 		baseFileOffset:       base,
@@ -112,7 +118,18 @@ func normalize(version int, base int64, offsetFirst int64, terms []termJSON, fet
 		fetch:                fetch,
 	}
 	cur := base - offsetFirst
-	for _, t := range terms {
+	if cur < 0 {
+		return nil, &DataError{Reason: fmt.Sprintf("first term starts before file offset 0 (base %d, offset_into_first_range %d)", base, offsetFirst)}
+	}
+	for i, t := range terms {
+		if t.Range.Start >= t.Range.End {
+			return nil, &DataError{Xorb: t.Hash, Reason: fmt.Sprintf("term %d: empty/inverted chunk range [%d,%d)", i, t.Range.Start, t.Range.End)}
+		}
+		// unpacked_length is uint32 on the wire (never negative); a zero-length
+		// term for a non-empty chunk range is malformed.
+		if t.UnpackedLength == 0 {
+			return nil, &DataError{Xorb: t.Hash, Reason: fmt.Sprintf("term %d: zero unpacked_length for chunk range [%d,%d)", i, t.Range.Start, t.Range.End)}
+		}
 		rt := reconTerm{
 			xorb:           t.Hash,
 			unpackedLength: int64(t.UnpackedLength),
@@ -132,10 +149,18 @@ func normalize(version int, base int64, offsetFirst int64, terms []termJSON, fet
 			return entries[i].chunkEnd < entries[j].chunkEnd
 		})
 	}
-	return r
+	// Coverage: every term's chunk range must be tileable from its xorb's
+	// (now sorted) fetch entries, so no decode can hit a fetch gap.
+	for i := range r.terms {
+		t := &r.terms[i]
+		if coverRanges(r.fetch[t.xorb], t.chunkStart, t.chunkEnd) == nil {
+			return nil, &DataError{Xorb: t.xorb, Reason: fmt.Sprintf("term %d: fetch info cannot cover chunk range [%d,%d)", i, t.chunkStart, t.chunkEnd)}
+		}
+	}
+	return r, nil
 }
 
-func normalizeV1(v *reconstructionV1JSON, base int64) *reconstruction {
+func normalizeV1(v *reconstructionV1JSON, base int64) (*reconstruction, error) {
 	fetch := make(map[string][]fetchRange, len(v.FetchInfo))
 	for hash, infos := range v.FetchInfo {
 		for _, fi := range infos {
@@ -151,7 +176,7 @@ func normalizeV1(v *reconstructionV1JSON, base int64) *reconstruction {
 	return normalize(1, base, v.OffsetIntoFirstRange, v.Terms, fetch)
 }
 
-func normalizeV2(v *reconstructionV2JSON, base int64) *reconstruction {
+func normalizeV2(v *reconstructionV2JSON, base int64) (*reconstruction, error) {
 	fetch := make(map[string][]fetchRange, len(v.Xorbs))
 	for hash, fetches := range v.Xorbs {
 		for _, f := range fetches {
@@ -256,7 +281,11 @@ func (c *Client) getReconV2(ctx context.Context, route, reqURL, rangeHeader stri
 		if err := json.NewDecoder(resp.Body).Decode(&v); err != nil {
 			return nil, "", fmt.Errorf("xet: decode v2 reconstruction: %w", err)
 		}
-		return normalizeV2(&v, base), "", nil
+		recon, err := normalizeV2(&v, base)
+		if err != nil {
+			return nil, "", err
+		}
+		return recon, "", nil
 	case http.StatusNotFound:
 		_ = resp.Body.Close()
 		return nil, "404", nil
@@ -281,5 +310,5 @@ func (c *Client) getReconV1(ctx context.Context, route, reqURL, rangeHeader stri
 	if err := json.NewDecoder(resp.Body).Decode(&v); err != nil {
 		return nil, fmt.Errorf("xet: decode v1 reconstruction: %w", err)
 	}
-	return normalizeV1(&v, base), nil
+	return normalizeV1(&v, base)
 }

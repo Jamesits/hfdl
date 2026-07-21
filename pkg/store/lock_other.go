@@ -1,4 +1,4 @@
-//go:build !linux && !darwin && !windows
+//go:build !unix && !windows
 
 package store
 
@@ -7,14 +7,13 @@ import (
 	"os"
 )
 
-// acquireLock is best-effort on platforms without a wired advisory lock:
-// the lock file is created so operators can see which DB is active.
+// acquireLock refuses to open the store on platforms with no wired advisory
+// lock (everything but unix flock and Windows LockFileEx). The single-process
+// guarantee (a second hfdl must fail fast) cannot be honored here, and
+// silently skipping the lock would let two processes corrupt one WAL DB, so the
+// honest degradation is to fail rather than pretend.
 func acquireLock(path string) (*os.File, error) {
-	f, err := os.OpenFile(path, os.O_CREATE|os.O_RDWR, 0o600)
-	if err != nil {
-		return nil, fmt.Errorf("store: open lock file: %w", err)
-	}
-	return f, nil
+	return nil, fmt.Errorf("store: single-process lock unsupported on this platform (lock file %s): %w", path, ErrLocked)
 }
 
 func releaseLock(f *os.File) error {

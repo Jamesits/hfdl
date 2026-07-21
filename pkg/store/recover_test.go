@@ -29,7 +29,7 @@ func TestRecoverRequeuesExpired(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := s.ReplacePendingBlocks(ctx, fileID, []Block{{Idx: 0, Offset: 0, Length: 100}}); err != nil {
+	if err := s.ReplacePendingBlocks(ctx, fileID, ftok, []Block{{Idx: 0, Offset: 0, Length: 100}}); err != nil {
 		t.Fatal(err)
 	}
 	leased, err := s.LeaseBlocks(ctx, 1, BlockFilter{FileIDs: []int64{fileID}}, past)
@@ -43,7 +43,21 @@ func TestRecoverRequeuesExpired(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	// salvaging file (tokenless claim has no lease_until; Recover leaves it).
+	// leased salvaging file (crashed salvage-apply): claim it while it is the
+	// only salvaging row so LeaseSalvage stamps THIS one's lease at `past`.
+	// Recover must requeue it (salvaging→queued) — the durable lease closes the
+	// old stranding gap where a crashed salvage sat forever.
+	lsID := insertFile(t, s, repoID, "lsv", 10, FileQueued)
+	if err := s.MarkSalvaging(ctx, lsID); err != nil {
+		t.Fatal(err)
+	}
+	lsvF, _, err := s.LeaseSalvage(ctx, past)
+	if err != nil || lsvF.ID != lsID {
+		t.Fatalf("LeaseSalvage: %v (id %d)", err, lsvF.ID)
+	}
+
+	// plain salvaging file: MarkSalvaging leaves no lease, so Recover leaves it
+	// for the disk worker to LeaseSalvage on the next pass.
 	svID := insertFile(t, s, repoID, "sv", 10, FileQueued)
 	if err := s.MarkSalvaging(ctx, svID); err != nil {
 		t.Fatal(err)
@@ -73,7 +87,7 @@ func TestRecoverRequeuesExpired(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Recover: %v", err)
 	}
-	want := RecoveryStats{Repos: 1, Files: 1, Verifying: 1, Salvaging: 0, Blocks: 1, JobFiles: 1, References: 1}
+	want := RecoveryStats{Repos: 1, Files: 1, Verifying: 1, Salvaging: 1, Blocks: 1, JobFiles: 1, References: 1}
 	if stats != want {
 		t.Errorf("Recover stats = %+v, want %+v", stats, want)
 	}
@@ -86,7 +100,8 @@ func TestRecoverRequeuesExpired(t *testing.T) {
 		{"SELECT status FROM repos WHERE id = " + itoa(repoID), string(RepoPending)},
 		{"SELECT status FROM files WHERE id = " + itoa(fileID), string(FileQueued)},
 		{"SELECT status FROM files WHERE id = " + itoa(vID), string(FileDownloaded)},
-		{"SELECT status FROM files WHERE id = " + itoa(svID), string(FileSalvaging)}, // tokenless: untouched
+		{"SELECT status FROM files WHERE id = " + itoa(lsID), string(FileQueued)},    // leased salvage: requeued
+		{"SELECT status FROM files WHERE id = " + itoa(svID), string(FileSalvaging)}, // unleased: untouched
 		{"SELECT status FROM blocks WHERE id = " + itoa(leased[0].ID), string(BlockPending)},
 		{"SELECT status FROM job_files WHERE job_id = " + itoa(jobID) + " AND file_id = " + itoa(cID), string(JobFilePending)},
 		{"SELECT status FROM reference_files WHERE path = '/ref/r'", string(RefPending)},

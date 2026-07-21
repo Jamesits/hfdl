@@ -87,9 +87,18 @@ func (m *Manager) Run(ctx context.Context) error {
 			go m.diskWorker(runCtx)
 		}
 
+		// Cheap pool: cache-mode symlink/hardlink installs (metadata ops, no
+		// duty gate). Copy pool: local-dir reflink/copy installs — kept
+		// separate so a long copy can't starve cheap symlinks; copies serialize
+		// per (src,dst) volume pair and pace under the DutyLimiter inside the
+		// installer.
 		m.wg.Add(installCheapWorkers)
 		for range installCheapWorkers {
-			go m.installWorker(runCtx)
+			go m.installWorker(runCtx, store.DestModeCache)
+		}
+		m.wg.Add(installCopyWorkers)
+		for range installCopyWorkers {
+			go m.installWorker(runCtx, store.DestModeLocalDir)
 		}
 
 		m.wg.Add(1)

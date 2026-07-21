@@ -3,7 +3,6 @@ package tui
 import (
 	"context"
 	"errors"
-	"log/slog"
 	"time"
 
 	tea "github.com/charmbracelet/bubbletea"
@@ -100,9 +99,11 @@ type model struct {
 	paused        bool
 	current       *Snapshot
 	logs          logView
-	// warnBaseline is the ring's WARN+ count when the logs tab was entered;
-	// the dashboard badge only counts records newer than that visit.
-	warnBaseline int
+	// warnBaseline is the ring's cumulative WARN+ total when the logs tab was
+	// entered; the dashboard badge only counts records newer than that visit.
+	// It tracks WarnTotal (monotonic), not Count (retained-only), so eviction
+	// never makes the badge under-report.
+	warnBaseline uint64
 }
 
 func newModel(snap func() *Snapshot, ring *logging.Ring, version string, cb Callbacks) model {
@@ -132,16 +133,18 @@ func (m *model) poll() {
 	}
 }
 
-// warnBadge is the number of unseen WARN+ records while on the dashboard.
+// warnBadge is the number of unseen WARN+ records while on the dashboard. It
+// uses the ring's monotonic cumulative WARN+ total (not the retained-only
+// Count) so the badge stays accurate after the ring evicts older records.
 func (m *model) warnBadge() int {
 	if m.ring == nil {
 		return 0
 	}
-	n := m.ring.Count(slog.LevelWarn) - m.warnBaseline
-	if n < 0 {
+	total := m.ring.WarnTotal()
+	if total <= m.warnBaseline {
 		return 0
 	}
-	return n
+	return int(total - m.warnBaseline)
 }
 
 func (m model) Init() tea.Cmd { return tickCmd() }

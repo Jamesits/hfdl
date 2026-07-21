@@ -85,8 +85,6 @@ func (fd *fileDownload) executeBlock(ws *workerState, b Block, queueWait time.Du
 
 	attemptCtx, cancel := context.WithCancel(ws.ctx)
 	defer cancel()
-	conn := fd.stall.connStart(cancel)
-	defer fd.stall.connEnd(conn)
 
 	_, span := fd.d.tracer.Start(fd.spanCtx, "transfer.block", trace.WithAttributes(
 		attribute.Int("hfdl.block.idx", b.Idx),
@@ -98,10 +96,18 @@ func (fd *fileDownload) executeBlock(ws *workerState, b Block, queueWait time.Du
 
 	body, err := fd.src.Open(attemptCtx, b.Offset, b.Length)
 	if err != nil {
-		fd.handleOpenError(ws, b, attempt, err, span, conn)
+		fd.handleOpenError(ws, b, attempt, err, span)
 		return
 	}
 	defer body.Close()
+
+	// Arm the stall monitor only now that the body is open: the idle-read
+	// deadline (layer 2) counts from body byte 0, not from before the request.
+	// The header deadline in httpSource.do owns the pre-body connect/redirect/
+	// slow-start phase; overlapping the two would double-count it and could
+	// idle-kill a connection still waiting on legitimate response headers.
+	conn := fd.stall.connStart(cancel)
+	defer fd.stall.connEnd(conn)
 
 	upstream := upstreamOf(body)
 	span.SetAttributes(attribute.String("hfdl.upstream", upstream))
@@ -150,8 +156,10 @@ func (fd *fileDownload) executeBlock(ws *workerState, b Block, queueWait time.Du
 	}
 }
 
-// handleOpenError classifies failures before any body byte was consumed.
-func (fd *fileDownload) handleOpenError(ws *workerState, b Block, attempt int, err error, span trace.Span, conn *connTrack) {
+// handleOpenError classifies failures before any body byte was consumed. The
+// stall monitor is not yet armed here (it arms only after Open returns a body),
+// so there is no connTrack to reconcile.
+func (fd *fileDownload) handleOpenError(ws *workerState, b Block, attempt int, err error, span trace.Span) {
 	defer span.End()
 
 	// Fallback / drain / shutdown cancellation of the attempt context.
@@ -319,21 +327,24 @@ func retryBackoff(attempt int) time.Duration {
 }
 
 // reportRate folds a measured block rate into the per-file EMA view and the
-// global registry.
+// global registry (per-upstream and per-file EMA both).
 func (fd *fileDownload) reportRate(upstream string, bps float64) {
 	if fd.hs != nil {
 		fd.hs.reportRate(upstream, bps)
 	}
 	fd.d.cfg.Stats.ReportUpstreamRate(upstream, bps)
+	fd.d.cfg.Stats.ReportFileRate(fd.task.FileID, bps)
 }
 
-// penalize halves the upstream's EMA (both views) — stall or error.
+// penalize halves the upstream's EMA (both views) and temporarily blacklists
+// it for this file so the next block goes elsewhere — stall or error.
 func (fd *fileDownload) penalize(upstream string) {
 	if upstream == "" {
 		return
 	}
 	if fd.hs != nil {
 		fd.hs.penalize(upstream)
+		fd.hs.blacklist(upstream)
 	}
 	fd.d.cfg.Stats.PenalizeUpstream(upstream)
 }
@@ -580,6 +591,17 @@ func (fd *fileDownload) seqAdvance(end int64) {
 	fd.seqMu.Unlock()
 }
 
+// openFallback opens the whole-file single-stream body for the documented
+// rangeless fallback. Only the built-in http source has a rangeless fallback
+// (openWhole); a nil hs means the source can always range (xet), so the
+// fallback path must never have been entered.
+func (fd *fileDownload) openFallback(ctx context.Context) (io.ReadCloser, error) {
+	if fd.hs == nil {
+		return nil, fmt.Errorf("transfer: single-stream fallback requires the http source")
+	}
+	return fd.hs.openWhole(ctx)
+}
+
 // runFallback executes the documented single-stream fallback: no upstream
 // can range the object, so the whole file is fetched as one GET over one
 // connection. Mid-file resume is unsupported — any failure restarts the
@@ -631,7 +653,7 @@ func (fd *fileDownload) fallbackStream(ctx context.Context) (string, int64, erro
 	conn := fd.stall.connStart(cancel)
 	defer fd.stall.connEnd(conn)
 
-	body, err := fd.src.Open(attemptCtx, 0, fd.task.Size)
+	body, err := fd.openFallback(attemptCtx)
 	if err != nil {
 		return "", 0, err
 	}

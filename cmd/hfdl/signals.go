@@ -10,17 +10,18 @@ import (
 
 // watchSignals wires graceful shutdown: the first SIGINT/SIGTERM cancels the
 // root context (Manager.Run stops leasing and final checkpoints persist); a
-// second signal hard-exits like hf does. The channel is a seam so tests can
-// inject signals without touching the process. Returns a stop func that
-// detaches the watcher.
-func watchSignals(ctx context.Context, cancel context.CancelFunc, sigCh <-chan os.Signal) (stop func()) {
+// second signal hard-exits like hf does. The watcher deliberately does NOT
+// select on ctx.Done — the first signal cancels ctx, and returning there would
+// kill the watcher before a second signal could be observed, making the
+// force-exit unreachable. It runs until stop() or the channel closes. The
+// channel is a seam so tests can inject signals without touching the process.
+// stop() detaches the OS delivery (signal.Stop) and ends the watcher.
+func watchSignals(ctx context.Context, cancel context.CancelFunc, sigCh chan os.Signal) (stop func()) {
 	done := make(chan struct{})
 	go func() {
 		var canceled bool
 		for {
 			select {
-			case <-ctx.Done():
-				return
 			case <-done:
 				return
 			case sig, ok := <-sigCh:
@@ -39,11 +40,15 @@ func watchSignals(ctx context.Context, cancel context.CancelFunc, sigCh <-chan o
 			}
 		}
 	}()
-	return func() { close(done) }
+	return func() {
+		signal.Stop(sigCh)
+		close(done)
+	}
 }
 
-// defaultSignalChan delivers SIGINT/SIGTERM for the real CLI.
-func defaultSignalChan() <-chan os.Signal {
+// defaultSignalChan delivers SIGINT/SIGTERM for the real CLI. It returns the
+// bidirectional channel so watchSignals's stop can signal.Stop it.
+func defaultSignalChan() chan os.Signal {
 	ch := make(chan os.Signal, 2)
 	signal.Notify(ch, os.Interrupt, syscall.SIGTERM)
 	return ch

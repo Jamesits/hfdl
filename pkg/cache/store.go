@@ -41,6 +41,19 @@ func OpenStore(ctx context.Context, root string, e *fcio.Engine, log *slog.Logge
 			return nil, fmt.Errorf("cache: create %s: %w", dir, err)
 		}
 	}
+	// Namespace durability: fsync each freshly-created directory and its
+	// parent so the blobs/ and incomplete/ entries survive a crash before
+	// the first blob lands (fsync of an existing dir on reopen is idempotent).
+	for _, dir := range []string{
+		abs,
+		filepath.Join(abs, "blobs"),
+		filepath.Join(abs, ".hfdl"),
+		filepath.Join(abs, ".hfdl", "incomplete"),
+	} {
+		if err := fsyncDir(dir); err != nil {
+			return nil, err
+		}
+	}
 	// huggingface_hub marks every cache root with a cache directory tag;
 	// written only when absent, never rewritten (hf parity).
 	tag := filepath.Join(abs, "CACHEDIR.TAG")
@@ -65,19 +78,51 @@ func (s *Store) IncompletePath(fileID int64) string {
 	return filepath.Join(s.root, ".hfdl", "incomplete", strconv.FormatInt(fileID, 10)+".part")
 }
 
-// BlobPath is the published path of a content-addressed blob.
+// BlobPath is the published path of a content-addressed blob. It returns ""
+// for a blob id that is not a bare hex digest (see validateBlobID): a raw
+// join of an absolute or "../"-laden id would escape blobs/, so an unsafe id
+// resolves to no path at all. The security-critical callers (Publish,
+// HasBlob, installer) also validate explicitly for a typed error; the ""
+// return is defence in depth for any other caller.
 func (s *Store) BlobPath(blobID string) string {
+	if validateBlobID(blobID) != nil {
+		return ""
+	}
 	return filepath.Join(s.root, "blobs", blobID)
 }
 
-// HasBlob reports whether blobID is published.
+// HasBlob reports whether blobID is published. An invalid blob id (BlobPath
+// == "") is never published.
 func (s *Store) HasBlob(blobID string) (path string, ok bool) {
 	p := s.BlobPath(blobID)
+	if p == "" {
+		return "", false
+	}
 	info, err := os.Stat(p)
 	if err != nil || info.IsDir() {
 		return "", false
 	}
 	return p, true
+}
+
+// validateBlobID rejects any blob id that is not a bare hex digest: exactly
+// 40 (git blob sha1) or 64 (LFS/xet sha256) hex characters, no path
+// separators, no "..", no absolute prefix. Blob ids come from repo metadata,
+// so this is the gate that keeps a hostile id from escaping blobs/.
+func validateBlobID(blobID string) error {
+	if n := len(blobID); n != 40 && n != 64 {
+		return &PathSafetyError{Path: blobID, Reason: "blob id must be 40 (sha1) or 64 (sha256) hex chars"}
+	}
+	for i := 0; i < len(blobID); i++ {
+		if !isHexDigit(blobID[i]) {
+			return &PathSafetyError{Path: blobID, Reason: "blob id must be hex"}
+		}
+	}
+	return nil
+}
+
+func isHexDigit(c byte) bool {
+	return (c >= '0' && c <= '9') || (c >= 'a' && c <= 'f') || (c >= 'A' && c <= 'F')
 }
 
 // createEmptyFile leaves an empty file at path — the shape of

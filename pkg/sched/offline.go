@@ -36,7 +36,7 @@ type layoutEntry struct {
 // back either).
 func (m *Manager) findInSnapshot(repoType, repoName, sha, repoPath string) (*layoutEntry, error) {
 	snap, err := cache.SafeJoin(filepath.Join(
-		m.cfg.Cache.Root(), repoCacheDirName(repoType, repoName), "snapshots", sha), repoPath)
+		m.cfg.Cache.Root(), cache.ModelDirName(repoType, repoName), "snapshots", sha), repoPath)
 	if err != nil {
 		return nil, err
 	}
@@ -64,7 +64,7 @@ func (m *Manager) findInSnapshot(repoType, repoName, sha, repoPath string) (*lay
 // (<cacheRoot>/<type>s--org--name/refs/<rev>).
 func (m *Manager) readRefsSHA(repoType, repoName, rev string) (string, error) {
 	refPath, err := cache.SafeJoin(filepath.Join(
-		m.cfg.Cache.Root(), repoCacheDirName(repoType, repoName), "refs"), rev)
+		m.cfg.Cache.Root(), cache.ModelDirName(repoType, repoName), "refs"), rev)
 	if err != nil {
 		return "", err
 	}
@@ -82,7 +82,7 @@ func (m *Manager) readRefsSHA(repoType, repoName, rev string) (string, error) {
 // walkSnapshot lists every file entry of a cached commit (offline snapshot
 // mode with a fresh state DB: the snapshot dir IS the listing).
 func (m *Manager) walkSnapshot(repoType, repoName, sha string) ([]layoutEntry, error) {
-	root := filepath.Join(m.cfg.Cache.Root(), repoCacheDirName(repoType, repoName), "snapshots", sha)
+	root := filepath.Join(m.cfg.Cache.Root(), cache.ModelDirName(repoType, repoName), "snapshots", sha)
 	var out []layoutEntry
 	err := filepath.WalkDir(root, func(p string, d fs.DirEntry, err error) error {
 		if err != nil || d.IsDir() {

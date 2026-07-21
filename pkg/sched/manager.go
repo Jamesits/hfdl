@@ -26,9 +26,13 @@ import (
 	"go.opentelemetry.io/otel/trace"
 )
 
-// salvageAttr tags salvaged bytes on the shared download-bytes counter
-// (kind=network|salvage; transfer owns network).
-var salvageAttr = metric.WithAttributes(attribute.String("kind", "salvage"))
+// salvageAttr / networkAttr tag the shared hfdl.download.bytes counter by
+// origin (kind=network|salvage): network bytes are tallied from block-done
+// events, salvaged bytes from the disk queue.
+var (
+	salvageAttr = metric.WithAttributes(attribute.String("kind", "salvage"))
+	networkAttr = metric.WithAttributes(attribute.String("kind", "network"))
+)
 
 const (
 	// metaWorkers is the pinned meta-queue depth: two listing workers.
@@ -36,6 +40,11 @@ const (
 	// installCheapWorkers is the pinned cheap-install pool of four:
 	// symlink/hardlink installs are metadata ops, no duty gate.
 	installCheapWorkers = 4
+	// installCopyWorkers is the local-dir reflink/copy pool. Copies serialize
+	// per (src,dst) volume pair (installer VolumeSet) and pace under the
+	// DutyLimiter, so a small pool suffices — its point is to progress copies
+	// across distinct volume pairs without blocking the cheap symlink pool.
+	installCopyWorkers = 2
 
 	// maxBlockRetries is the give-up bound for block requeues.
 	maxBlockRetries = 8
@@ -114,8 +123,12 @@ type ManagerConfig struct {
 	DryRun        bool
 }
 
-// Manager is the queue manager. Construct with NewManager; Submit jobs,
-// then Run to drain. Not safe for concurrent Run; everything else is.
+// Manager is the queue manager. Construct with NewManager; Submit jobs, then
+// Run to drain. A single Run at a time (the runMu guard rejects a concurrent
+// one). Submit and the hot-update APIs (SetLimits, Snapshot) are safe to call
+// concurrently with a running Run — each shared field carries its own guard
+// (limitsMu, activeMu, enospcMu, salvageMu, repoMu, …); there is no single
+// "everything else is safe" invariant, only these per-field locks.
 type Manager struct {
 	cfg ManagerConfig
 	log *slog.Logger
@@ -135,8 +148,9 @@ type Manager struct {
 	metaEndpoint string
 
 	// limits (hot-settable; see limits.go).
-	limitsMu sync.RWMutex
-	limits   config.Limits
+	limitsMu  sync.RWMutex
+	limits    config.Limits
+	limitsSet bool // an explicit SetLimits (CLI/Submit/TUI) has been applied
 
 	// pause gates (gates.go): operator pause and ENOSPC pause both block
 	// the download and install queues.
@@ -154,10 +168,11 @@ type Manager struct {
 	activeMu sync.Mutex
 	active   map[int64]*activeFile
 
-	// salvage bookkeeping (salvage.go / disk.go).
-	salvageMu    sync.Mutex
-	refsEnabled  bool           // any --reference roots recorded
-	salvageClaim map[int64]bool // salvaging files owned by a disk worker
+	// salvage bookkeeping (salvage.go / disk.go). salvageMu guards refsEnabled;
+	// salvaging files are now claimed by the durable store lease (LeaseSalvage),
+	// not an in-memory map.
+	salvageMu   sync.Mutex
+	refsEnabled bool // any --reference roots recorded
 
 	// repo cache: repo ID -> row (meta worker fills; download reads).
 	repoMu   sync.RWMutex
@@ -196,7 +211,11 @@ type Manager struct {
 
 	// ENOSPC pause bookkeeping (gates.go): the failed demand, the probe
 	// directory, and the poll backoff persisted across episodes of one run
-	// (a flapping volume reaches the cap and stays there).
+	// (a flapping volume reaches the cap and stays there). enospcMu guards the
+	// whole episode transition (check-then-start) plus enospcDemand/enospcDir,
+	// so two concurrent IO failures can never both spawn a watcher and the
+	// watcher never races a mid-episode demand raise.
+	enospcMu        sync.Mutex
 	enospcDemand    int64
 	enospcDir       string
 	enospcBackoffNs atomic.Int64
@@ -252,7 +271,6 @@ func NewManager(cfg ManagerConfig) *Manager {
 		wakeDisk:        make(chan struct{}, 1),
 		wakeInstall:     make(chan struct{}, 1),
 		active:          make(map[int64]*activeFile),
-		salvageClaim:    make(map[int64]bool),
 		repoByID:        make(map[int64]*store.Repo),
 		spans:           make(map[int64]trace.Span),
 		statfsFreeFn:    statfsFree,

@@ -61,13 +61,17 @@ type downloadFlags struct {
 
 func newDownloadCmd() *cobra.Command {
 	f := &downloadFlags{}
+	// Single source of truth for numeric flag defaults: config.DefaultLimits.
+	// Keeps the cobra registration, config.DefaultLimits and the parity tests
+	// from drifting apart.
+	dfl := config.DefaultLimits()
 	cmd := &cobra.Command{
 		Use:   "download <repo_id> [<filename> ...]",
 		Short: "Download files from the Hugging Face Hub",
 		Long: "Download a model, dataset or space from the Hugging Face Hub.\n" +
 			"repo_id accepts \"org/repo\" or an hf:// URI (\"hf://datasets/org/repo@rev\").\n" +
 			"On success the absolute local path (file or directory) is printed on stdout\n" +
-			"as path=<abspath>, or as the bare path with --quiet.",
+			"as exactly that path and nothing else, matching `hf download`.",
 		Args:         cobra.MinimumNArgs(1),
 		SilenceUsage: true,
 		RunE: func(cmd *cobra.Command, args []string) error {
@@ -91,22 +95,22 @@ func newDownloadCmd() *cobra.Command {
 	fl.BoolVar(&f.quiet, "quiet", false, "suppress progress output; only the final path is printed")
 	fl.BoolVar(&f.forceDownload, "force-download", false, "re-download even when the file is already cached")
 	fl.BoolVar(&f.dryRun, "dry-run", false, "resolve and list what would be downloaded, then exit")
-	fl.IntVar(&f.maxWorkers, "max-workers", 8, "files downloaded concurrently")
+	fl.IntVar(&f.maxWorkers, "max-workers", dfl.MaxWorkers, "files downloaded concurrently")
 
 	// hfdl extensions.
 	fl.StringArrayVar(&f.endpointFlags, "endpoint", nil, "Hub endpoint URL (repeatable; mirrors after the first; default $HF_ENDPOINT)")
-	fl.IntVar(&f.connections, "connections", 8, "block connections per file")
+	fl.IntVar(&f.connections, "connections", dfl.Conns, "block connections per file")
 	fl.StringVar(&f.blockSizeStr, "block-size", "", "download block size (default: adaptive 4MiB-64MiB)")
 	fl.StringVar(&f.policyStr, "upstream-policy", config.BestSpeed.String(), "per-block upstream selection: best-speed|random|round-robin")
 	fl.StringArrayVar(&f.references, "reference", nil, "local file/dir to salvage whole-file matches from (repeatable)")
 	fl.StringVar(&f.bandwidthStr, "max-bandwidth", "", "global download bandwidth cap (e.g. 500MiB/s; default unlimited)")
-	fl.Int64Var(&f.apiIOPS, "api-iops", 5, "HF API requests per second (burst 10)")
-	fl.IntVar(&f.diskActive, "disk-active", 100, "disk duty-cycle ceiling 1-100 (percent)")
-	fl.DurationVar(&f.stallTimeout, "stall-timeout", 15*time.Second, "idle-read stall window")
+	fl.Int64Var(&f.apiIOPS, "api-iops", dfl.APIIOPS, "HF API requests per second (burst 10)")
+	fl.IntVar(&f.diskActive, "disk-active", dfl.DiskActivePct, "disk duty-cycle ceiling 1-100 (percent)")
+	fl.DurationVar(&f.stallTimeout, "stall-timeout", dfl.StallTimeout, "idle-read stall window")
 	fl.StringVar(&f.stallMinStr, "stall-min-bytes", "32KiB", "minimum bytes per stall window before a connection is killed")
 	fl.StringVar(&f.ioModeStr, "io-mode", config.IOAuto.String(), "storage IO mode: auto|direct|sequential")
 	fl.StringVar(&f.ioBufferStr, "io-buffer", "", "RAM write-cache pool cap (default auto: clamp(slab*connections*2, 64MiB, 1GiB))")
-	fl.DurationVar(&f.checkpointIntv, "checkpoint-interval", 30*time.Second, "durable progress cadence (flush/fsync/persist)")
+	fl.DurationVar(&f.checkpointIntv, "checkpoint-interval", dfl.CheckpointInterval, "durable progress cadence (flush/fsync/persist)")
 	fl.StringVar(&f.stateDBFlag, "state-db", "", "state database path (default <cache>/.hfdl/state.db)")
 	fl.StringVar(&f.logLevelStr, "log-level", "info", "log level: debug|info|warn|error")
 	fl.BoolVar(&f.noTUI, "no-tui", false, "disable the interactive TUI")
@@ -203,7 +207,11 @@ func buildPlan(f *downloadFlags, getenv func(string) string) (*downloadPlan, err
 			return nil, fmt.Errorf("--local-dir: %w", err)
 		}
 		f.localDir = abs
-	} else if abs, err := filepath.Abs(cacheDir); err == nil {
+	} else {
+		abs, err := filepath.Abs(cacheDir)
+		if err != nil {
+			return nil, fmt.Errorf("cache dir %q: %w", cacheDir, err)
+		}
 		cacheDir = abs
 	}
 
@@ -259,13 +267,19 @@ func runDownload(ctx context.Context, f *downloadFlags, getenv func(string) stri
 	// periodic slog progress on stderr (or silence when quiet). The decision
 	// precedes wiring: TUI mode constructs the root handler without a stderr
 	// leg at all.
-	useTUI := !p.quiet && !p.noTUI && stderrIsTTY()
+	useTUI := !p.quiet && !p.noTUI && stdoutIsTTY()
 
 	a, err := wireDownload(ctx, p, getenv, !useTUI && !p.quiet)
 	if err != nil {
 		return err
 	}
 	defer a.close(ctx)
+
+	// hfdl.run root span: sched.job / transfer.file spans nest under it
+	// via ctx. Registered after a.close so its End runs first (defer LIFO),
+	// ending the span before the provider shutdown flushes it.
+	ctx, endRun := startRunSpan(ctx, a.prov, p)
+	defer endRun()
 
 	if err := a.submit(ctx, p); err != nil {
 		return err
@@ -308,23 +322,15 @@ func runDownload(ctx context.Context, f *downloadFlags, getenv func(string) stri
 		return printDryRun(os.Stdout, a.manager.DryRunReport())
 	}
 
-	// The final path is the contract output; a failed write (EPIPE, full
-	// disk on redirected output) is a real error, not a log line.
-	if _, err := fmt.Fprintln(os.Stdout, finalOutput(p, a.manager.Snapshot())); err != nil {
+	// The final path is the contract output: exactly the absolute local path
+	// and nothing else on stdout, matching the pinned hf CLI (huggingface_hub
+	// 1.24.0) in every mode — quiet, non-quiet, TTY or not (TUI mode prints
+	// after teardown). A failed write (EPIPE, full disk on redirected output)
+	// is a real error, not a log line.
+	if _, err := fmt.Fprintln(os.Stdout, finalPath(p, a.manager.Snapshot())); err != nil {
 		return fmt.Errorf("write final path: %w", err)
 	}
 	return nil
-}
-
-// finalOutput renders the exact stdout line of the pinned hf CLI
-// (huggingface_hub 1.24.0): quiet prints the bare absolute path; non-quiet
-// prefixes it with "path=". TTY vs non-TTY does not matter — only --quiet
-// does (TUI mode is non-quiet by definition and prints after teardown).
-func finalOutput(p *downloadPlan, snap *schedSnapshot) string {
-	if p.quiet {
-		return finalPath(p, snap)
-	}
-	return "path=" + finalPath(p, snap)
 }
 
 // finalPath computes the absolute local path `hf download` reports: the file

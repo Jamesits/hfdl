@@ -20,35 +20,84 @@ func (e *PathSafetyError) Error() string {
 	return fmt.Sprintf("cache: unsafe path %q: %s", e.Path, e.Reason)
 }
 
-// SafeJoin joins a repo-supplied relative path p onto root, rejecting
-// absolute paths, any ".." component, and symlink escapes. The escape check
-// resolves the deepest existing ancestor of the target's *parent* and
-// verifies containment inside the resolved root; the leaf itself is never
-// resolved because snapshot entries are symlinks into blobs/ by design
-// (huggingface_hub layout) and would fail containment by construction.
+// SafeJoin joins a repo-supplied relative path p onto root for a
+// POINTER-INSTALL target, rejecting absolute paths, any ".." component, and
+// ancestor-chain symlink escapes. The leaf itself is deliberately NOT resolved
+// because huggingface_hub snapshot entries are relative symlinks into blobs/
+// (a sibling of snapshots/) that hfdl creates by design; resolving the leaf
+// would reject them by construction. Snapshot symlinks are (re)created via an
+// atomic remove-then-symlink that never follows an existing leaf, so a hostile
+// pre-placed leaf here cannot redirect a write. Content writers must use
+// SafeJoinContent instead.
 func SafeJoin(root, p string) (string, error) {
+	return safeJoin(root, p, false)
+}
+
+// SafeJoinContent joins p onto root for a CONTENT-WRITE target (refs files,
+// .metadata stamps, tree-cache JSON, local-dir output, lock files). In
+// addition to the ancestor-chain check, the leaf is resolved too, so a
+// pre-existing leaf symlink that escapes root is rejected — a hostile symlink
+// planted at the write target can never redirect an O_TRUNC write outside the
+// destination tree (symlink escape). A leaf symlink that stays inside root is permitted.
+func SafeJoinContent(root, p string) (string, error) {
+	return safeJoin(root, p, true)
+}
+
+// validateRepoPath applies the repo-supplied relative-path rules without
+// touching the filesystem: non-empty, not absolute, no ".." component. Used
+// both by safeJoin (before the symlink-containment check) and where a repo
+// path is recorded rather than joined onto a root (tree-cache map keys).
+func validateRepoPath(p string) error {
 	if p == "" {
-		return "", &PathSafetyError{Path: p, Reason: "empty path"}
+		return &PathSafetyError{Path: p, Reason: "empty path"}
 	}
 	if filepath.IsAbs(p) || strings.HasPrefix(p, "/") {
-		return "", &PathSafetyError{Path: p, Reason: "absolute path"}
+		return &PathSafetyError{Path: p, Reason: "absolute path"}
 	}
 	for _, comp := range strings.Split(filepath.ToSlash(p), "/") {
 		if comp == ".." {
-			return "", &PathSafetyError{Path: p, Reason: `contains ".." component`}
+			return &PathSafetyError{Path: p, Reason: `contains ".." component`}
 		}
+	}
+	return nil
+}
+
+// validateComponent rejects a repo-derived name that must be a single path
+// component before it is joined onto a root: empty, ".", "..", absolute, or
+// containing a path separator. Used for names that skip SafeJoin — the
+// per-repo cache directory (ModelDirName output) and the blob-id lock file.
+func validateComponent(name string) error {
+	if name == "" || name == "." || name == ".." {
+		return &PathSafetyError{Path: name, Reason: "empty or dot component"}
+	}
+	if filepath.IsAbs(name) || strings.ContainsRune(name, '/') || strings.ContainsRune(name, filepath.Separator) {
+		return &PathSafetyError{Path: name, Reason: "not a single path component"}
+	}
+	return nil
+}
+
+func safeJoin(root, p string, resolveLeaf bool) (string, error) {
+	if err := validateRepoPath(p); err != nil {
+		return "", err
 	}
 	joined := filepath.Join(root, filepath.FromSlash(p))
 	resolvedRoot, err := resolvePath(root)
 	if err != nil {
 		return "", fmt.Errorf("cache: resolve root %s: %w", root, err)
 	}
-	resolvedParent, err := resolvePath(filepath.Dir(joined))
-	if err != nil {
-		return "", fmt.Errorf("cache: resolve parent of %s: %w", joined, err)
+	// Pointer install: check only the parent chain (the leaf may be a snapshot
+	// symlink into blobs/). Content write: resolve the leaf too, so an existing
+	// leaf symlink escaping root is caught by the containment check.
+	probe := filepath.Dir(joined)
+	if resolveLeaf {
+		probe = joined
 	}
-	if resolvedParent != resolvedRoot &&
-		!strings.HasPrefix(resolvedParent, resolvedRoot+string(filepath.Separator)) {
+	resolved, err := resolvePath(probe)
+	if err != nil {
+		return "", fmt.Errorf("cache: resolve %s: %w", probe, err)
+	}
+	if resolved != resolvedRoot &&
+		!strings.HasPrefix(resolved, resolvedRoot+string(filepath.Separator)) {
 		return "", &PathSafetyError{Path: p, Reason: "escapes root via symlink"}
 	}
 	return joined, nil

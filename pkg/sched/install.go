@@ -136,12 +136,12 @@ func (m *Manager) maybeWriteTreeCache(ctx context.Context, j *store.Job, r *stor
 	}
 }
 
-// installWorker runs the install queue: lease one pending job_files
-// row whose file is cached, materialize it (cache-mode symlink, or
-// local-dir reflink/copy), complete the lease. The cheap pool is metadata
-// ops (symlinks); copies are serialized per (src,dst) volume pair by the
-// installer's own VolumeSet locking.
-func (m *Manager) installWorker(ctx context.Context) {
+// installWorker runs one install pool, restricted to jobs of destMode
+// ("cache" symlinks, or "local-dir" reflink/copy). Splitting the pools keeps
+// cheap cache-mode symlink installs from starving behind long local-dir
+// copies, which are additionally serialized per (src,dst) volume pair and
+// duty-gated by the installer's own VolumeSet + DutyLimiter.
+func (m *Manager) installWorker(ctx context.Context, destMode string) {
 	defer m.wg.Done()
 	for {
 		if ctx.Err() != nil {
@@ -150,7 +150,7 @@ func (m *Manager) installWorker(ctx context.Context) {
 		if err := m.waitResumable(ctx); err != nil {
 			return
 		}
-		jf, f, j, r, tok, err := m.st.LeaseInstall(ctx, m.nowFn())
+		jf, f, j, r, tok, err := m.st.LeaseInstallMode(ctx, m.nowFn(), destMode)
 		if errors.Is(err, store.ErrNoWork) {
 			if !m.waitForWork(ctx, m.wakeInstall) {
 				return

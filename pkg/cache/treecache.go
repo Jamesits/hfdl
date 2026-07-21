@@ -67,25 +67,37 @@ func (in *Installer) WriteTreeCacheIfAbsent(ctx context.Context, dir, commitSHA 
 // <cacheDir>/<type>s--org--name/trees/<commitSHA>.json. sched calls it once
 // per cache-mode job after that job's installs complete.
 func (in *Installer) WriteModelTreeCache(ctx context.Context, cacheDir, repoType, repoName, commitSHA string, entries []TreeEntry) error {
-	return in.writeTreeCache(ctx, filepath.Join(cacheDir, modelDirName(repoType, repoName)), commitSHA, entries)
+	return in.writeTreeCache(ctx, filepath.Join(cacheDir, ModelDirName(repoType, repoName)), commitSHA, entries)
 }
 
 // WriteModelTreeCacheIfAbsent is the cache-mode fallback; see
 // WriteTreeCacheIfAbsent.
 func (in *Installer) WriteModelTreeCacheIfAbsent(ctx context.Context, cacheDir, repoType, repoName, commitSHA string, entries []TreeEntry) (written bool, err error) {
-	return in.writeTreeCacheIfAbsent(ctx, filepath.Join(cacheDir, modelDirName(repoType, repoName)), commitSHA, entries)
+	return in.writeTreeCacheIfAbsent(ctx, filepath.Join(cacheDir, ModelDirName(repoType, repoName)), commitSHA, entries)
 }
 
-// writeTreeCacheIfAbsent reports whether it wrote.
+// writeTreeCacheIfAbsent reports whether it wrote. The if-absent decision is
+// TOCTOU-free: O_CREATE|O_EXCL atomically claims the path (creating an empty
+// placeholder we then overwrite with the authoritative temp+rename write) or
+// fails EEXIST, meaning another writer already produced the file — nothing to
+// backfill.
 func (in *Installer) writeTreeCacheIfAbsent(ctx context.Context, parent, commitSHA string, entries []TreeEntry) (bool, error) {
 	treePath, err := treeCachePath(parent, commitSHA)
 	if err != nil {
 		return false, err
 	}
-	if _, err := os.Lstat(treePath); err == nil {
-		return false, nil
-	} else if !errors.Is(err, os.ErrNotExist) {
-		return false, fmt.Errorf("cache: stat %s: %w", treePath, err)
+	if err := os.MkdirAll(filepath.Dir(treePath), 0o755); err != nil {
+		return false, fmt.Errorf("cache: create trees dir: %w", err)
+	}
+	cf, err := os.OpenFile(treePath, os.O_CREATE|os.O_EXCL|os.O_WRONLY, 0o644)
+	if err != nil {
+		if errors.Is(err, os.ErrExist) {
+			return false, nil
+		}
+		return false, fmt.Errorf("cache: claim %s: %w", treePath, err)
+	}
+	if err := cf.Close(); err != nil {
+		return false, fmt.Errorf("cache: claim %s: %w", treePath, err)
 	}
 	return true, in.writeTreeCache(ctx, parent, commitSHA, entries)
 }
@@ -95,7 +107,7 @@ func treeCachePath(parent, commitSHA string) (string, error) {
 	if commitSHA == "" {
 		return "", fmt.Errorf("cache: tree cache requires a commit sha")
 	}
-	return SafeJoin(filepath.Join(parent, "trees"), commitSHA+".json")
+	return SafeJoinContent(filepath.Join(parent, "trees"), commitSHA+".json")
 }
 
 // writeTreeCache writes <parent>/trees/<commitSHA>.json in hf's
@@ -109,8 +121,11 @@ func (in *Installer) writeTreeCache(ctx context.Context, parent, commitSHA strin
 	}
 	files := make(map[string]treeFileJSON, len(entries))
 	for _, e := range entries {
-		if e.Path == "" {
-			return fmt.Errorf("cache: tree entry with empty path")
+		// Tree entries are repo-controlled; validate each path with the same
+		// rules as a join target (non-empty, not absolute, no "..") before it
+		// becomes a persisted map key.
+		if err := validateRepoPath(e.Path); err != nil {
+			return err
 		}
 		// Repo paths are slash-separated in the JSON regardless of host OS.
 		files[filepath.ToSlash(e.Path)] = treeFileJSON{
@@ -133,15 +148,23 @@ func (in *Installer) writeTreeCache(ctx context.Context, parent, commitSHA strin
 		return fmt.Errorf("cache: marshal tree cache: %w", err)
 	}
 	data := bytes.TrimSuffix(buf.Bytes(), []byte("\n"))
-	treePath, err := SafeJoin(filepath.Join(parent, "trees"), commitSHA+".json")
+	treePath, err := SafeJoinContent(filepath.Join(parent, "trees"), commitSHA+".json")
 	if err != nil {
 		return err
 	}
-	if err := os.MkdirAll(filepath.Dir(treePath), 0o755); err != nil {
+	treeDir := filepath.Dir(treePath)
+	if err := os.MkdirAll(treeDir, 0o755); err != nil {
 		return fmt.Errorf("cache: create trees dir: %w", err)
 	}
-	if err := writeFileSync(treePath, data, 0o644); err != nil {
+	// Authoritative write is atomic: temp + fsync + rename over any existing
+	// (or if-absent placeholder) file + parent-dir fsync.
+	treeTmp := treePath + tmpSuffix
+	if err := writeFileSync(treeTmp, data, 0o644); err != nil {
 		return err
 	}
-	return in.fsyncDirFn(filepath.Dir(treePath))
+	if err := replaceFile(treeTmp, treePath); err != nil {
+		_ = os.Remove(treeTmp)
+		return fmt.Errorf("cache: rename %s → %s: %w", treeTmp, treePath, err)
+	}
+	return in.fsyncDirFn(treeDir)
 }

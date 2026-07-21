@@ -168,18 +168,38 @@ func (s *Store) FailJobFilesForFile(ctx context.Context, fileID int64, cause err
 	})
 }
 
-// ReleaseMeta requeues a claimed repo (listing → pending, retries++),
-// fenced by the listing token: the transient/429 path puts the row back
-// immediately instead of waiting out the lease. ErrFenced on 0 rows.
-func (s *Store) ReleaseMeta(ctx context.Context, repoID int64, tok LeaseToken, cause error) error {
+// DeferMeta requeues a claimed repo (listing → pending) with a backoff but
+// WITHOUT counting a retry — used when a gate (a 429 endpoint cooldown) blocks
+// the repo's endpoint, so the listing lease is not held across the wait. A gate
+// deferral is not a failure, so it must not consume the give-up budget. Fenced
+// by the listing token; ErrFenced on 0 rows.
+func (s *Store) DeferMeta(ctx context.Context, repoID int64, tok LeaseToken, availableAt time.Time) error {
+	return execGuarded(ctx, s.db, "defer meta", repoID,
+		"UPDATE repos SET status = ?, available_at = ?, "+
+			"lease_owner = NULL, lease_token = NULL, lease_until = NULL, updated_at = ? "+
+			"WHERE id = ? AND status = ? AND lease_token = ?",
+		string(RepoPending), utc(availableAt), utc(time.Now()), repoID, string(RepoListing), string(tok))
+}
+
+// ReleaseMeta requeues a claimed repo (listing → pending, retries++) with a
+// durable backoff — availableAt hides the row from LeaseMeta until it elapses,
+// so a persistent 5xx no longer hot-loops lease→fail→re-lease. Fenced by the
+// listing token; ErrFenced on 0 rows. Pass a zero availableAt for an immediate
+// requeue (no backoff).
+func (s *Store) ReleaseMeta(ctx context.Context, repoID int64, tok LeaseToken, availableAt time.Time, cause error) error {
 	var lastErr *string
 	if cause != nil {
 		msg := cause.Error()
 		lastErr = &msg
 	}
+	var avail *time.Time
+	if !availableAt.IsZero() {
+		u := utc(availableAt)
+		avail = &u
+	}
 	return execGuarded(ctx, s.db, "release meta", repoID,
-		"UPDATE repos SET status = ?, retries = retries + 1, last_error = ?, "+
+		"UPDATE repos SET status = ?, retries = retries + 1, last_error = ?, available_at = ?, "+
 			"lease_owner = NULL, lease_token = NULL, lease_until = NULL, updated_at = ? "+
 			"WHERE id = ? AND status = ? AND lease_token = ?",
-		string(RepoPending), lastErr, utc(time.Now()), repoID, string(RepoListing), string(tok))
+		string(RepoPending), lastErr, avail, utc(time.Now()), repoID, string(RepoListing), string(tok))
 }

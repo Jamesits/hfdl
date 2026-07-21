@@ -3,10 +3,6 @@ package xet
 import (
 	"errors"
 	"fmt"
-	"net/http"
-	"strconv"
-	"strings"
-	"time"
 )
 
 // ErrNotPrepared is returned by Open/Boundaries when Prepare has not run
@@ -69,25 +65,4 @@ type ReacquireError struct {
 
 func (e *ReacquireError) Error() string {
 	return fmt.Sprintf("xet: presigned URL reacquire exhausted after %d attempt(s)", e.Attempts)
-}
-
-// parseRetryAfter interprets a Retry-After header (delta-seconds or
-// HTTP-date); 0 when absent/unparseable. Mirrors hfapi's parser; duplicated
-// because hfapi's is unexported and the xet package must map CAS 429s onto
-// hfapi.RateLimitError for sched's cooldown handling.
-func parseRetryAfter(h string) time.Duration {
-	h = strings.TrimSpace(h)
-	if h == "" {
-		return 0
-	}
-	if n, err := strconv.Atoi(h); err == nil {
-		if n < 0 {
-			return 0
-		}
-		return time.Duration(n) * time.Second
-	}
-	if t, err := http.ParseTime(h); err == nil {
-		return max(time.Until(t), 0)
-	}
-	return 0
 }
