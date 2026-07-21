@@ -10,6 +10,18 @@ func envFrom(m map[string]string) func(string) string {
 	return func(k string) string { return m[k] }
 }
 
+func TestBandwidthBurst(t *testing.T) {
+	if got := BandwidthBurst(0); got != 0 {
+		t.Fatalf("unlimited burst = %d, want 0", got)
+	}
+	if got := BandwidthBurst(4 << 20); got != bandwidthMinBurst {
+		t.Fatalf("small limit burst = %d, want floor %d", got, bandwidthMinBurst)
+	}
+	if got := BandwidthBurst(64 << 20); got != 32<<20 {
+		t.Fatalf("burst = %d, want limit/2", got)
+	}
+}
+
 func TestCacheDirPrecedence(t *testing.T) {
 	for _, tc := range []struct {
 		name string

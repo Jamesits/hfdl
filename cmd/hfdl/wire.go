@@ -40,8 +40,6 @@ const (
 	// fcioPoolMinCap/MaxCap clamp the --io-buffer auto pool: 64MiB..1GiB.
 	fcioPoolMinCap = 64 << 20
 	fcioPoolMaxCap = 1 << 30
-	// bandwidthMinBurst floors the bandwidth bucket burst when a limit is set.
-	bandwidthMinBurst = 8 << 20
 	// progressInterval is the non-TTY slog progress cadence.
 	progressInterval = 30 * time.Second
 	// bandwidthStepStart is where +/- starts from when bandwidth is
@@ -213,7 +211,7 @@ func wireDownloadWith(ctx context.Context, p *downloadPlan, getenv func(string) 
 		app.close(ctx)
 		return nil, err
 	}
-	bandwidth := throttle.NewBucket(p.limits.MaxBandwidthBps, bandwidthBurst(p.limits.MaxBandwidthBps))
+	bandwidth := throttle.NewBucket(p.limits.MaxBandwidthBps, config.BandwidthBurst(p.limits.MaxBandwidthBps))
 	api := throttle.NewBucket(p.limits.APIIOPS, p.limits.APIBurst)
 	duty := throttle.NewDutyLimiter(p.limits.DiskActivePct, throttle.MediaUnknown)
 	// Probe the cache filesystem once: the duty derate depends on media class.
@@ -486,19 +484,6 @@ func mediaClass(t fcio.FsType) throttle.MediaClass {
 		return throttle.MediaNetFS
 	}
 	return throttle.MediaUnknown
-}
-
-// bandwidthBurst picks the token-bucket burst for a bandwidth ceiling:
-// burst = max(limit/2, 8MiB) when limited; unlimited buckets ignore the
-// burst.
-func bandwidthBurst(limit int64) int64 {
-	if limit <= 0 {
-		return 0
-	}
-	if b := limit / 2; b > bandwidthMinBurst {
-		return b
-	}
-	return bandwidthMinBurst
 }
 
 func clamp(v, lo, hi int64) int64 {

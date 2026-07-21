@@ -345,15 +345,6 @@ func TestMetricsSourceCollectNilSafe(t *testing.T) {
 }
 
 func TestHelpers(t *testing.T) {
-	if got := bandwidthBurst(0); got != 0 {
-		t.Fatalf("unlimited burst = %d", got)
-	}
-	if got := bandwidthBurst(4 << 20); got != bandwidthMinBurst {
-		t.Fatalf("small limit burst = %d, want floor %d", got, bandwidthMinBurst)
-	}
-	if got := bandwidthBurst(64 << 20); got != 32<<20 {
-		t.Fatalf("burst = %d, want limit/2", got)
-	}
 	if clamp(5, 10, 20) != 10 || clamp(25, 10, 20) != 20 || clamp(15, 10, 20) != 15 {
 		t.Fatal("clamp broken")
 	}

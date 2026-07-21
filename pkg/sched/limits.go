@@ -26,7 +26,10 @@ func (m *Manager) SetLimits(l config.Limits) {
 	m.limitsMu.Unlock()
 
 	if m.cfg.Bandwidth != nil && l.MaxBandwidthBps > 0 {
-		m.cfg.Bandwidth.SetRate(l.MaxBandwidthBps, m.cfg.Bandwidth.Stats().Burst)
+		// Recompute the burst for the new rate rather than inheriting the
+		// bucket's current one: an unlimited-started bucket reports burst 0,
+		// which SetRate would clamp to 1 and throttle the download to a crawl.
+		m.cfg.Bandwidth.SetRate(l.MaxBandwidthBps, config.BandwidthBurst(l.MaxBandwidthBps))
 	}
 	if m.cfg.API != nil && l.APIIOPS > 0 {
 		burst := l.APIBurst

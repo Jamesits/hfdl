@@ -6,15 +6,21 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"syscall"
 
 	"golang.org/x/sys/windows"
 )
 
 // isOutOfSpace classifies write/copy failures that trigger the global ENOSPC
 // pause: Windows surfaces disk-full as ERROR_DISK_FULL / ERROR_HANDLE_DISK_FULL.
+// The POSIX errnos are also honored so a CRT/cgo path (or a wrapped errno from
+// a portable dependency) that surfaces ENOSPC/EDQUOT is not misclassified as a
+// transient error.
 func isOutOfSpace(err error) bool {
 	return errors.Is(err, windows.ERROR_DISK_FULL) ||
-		errors.Is(err, windows.ERROR_HANDLE_DISK_FULL)
+		errors.Is(err, windows.ERROR_HANDLE_DISK_FULL) ||
+		errors.Is(err, syscall.ENOSPC) ||
+		errors.Is(err, syscall.EDQUOT)
 }
 
 // statfsFree returns free bytes available to the caller on the volume holding

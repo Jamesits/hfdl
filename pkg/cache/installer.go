@@ -191,6 +191,10 @@ func (in *Installer) installCache(ctx context.Context, r InstallRequest, blobPat
 	if err != nil {
 		return "", fmt.Errorf("cache: relative blob target: %w", err)
 	}
+	// huggingface_hub stores forward-slash symlink targets; filepath.Rel yields
+	// backslashes on Windows, so normalize for cross-platform cache parity (the
+	// pointer must resolve the same regardless of the OS that wrote it).
+	relTarget = filepath.ToSlash(relTarget)
 
 	// Fallback chain symlink → hardlink → copy: symlinks may be unavailable
 	// (EPERM on Windows without developer mode), and hardlinks fail

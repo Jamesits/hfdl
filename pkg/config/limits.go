@@ -99,6 +99,28 @@ type Limits struct {
 	UpstreamPolicy     UpstreamPolicy
 }
 
+// bandwidthMinBurst floors the bandwidth bucket burst when a limit is set: a
+// burst below the caller's read-chunk size (pool slabs are multi-MiB) forces
+// throttle.Bucket into single-token installments that hit its per-wait floor,
+// collapsing throughput to a crawl.
+const bandwidthMinBurst = 8 << 20
+
+// BandwidthBurst picks the token-bucket burst for a bandwidth ceiling:
+// max(limit/2, 8MiB) when limited; an unlimited (<=0) ceiling ignores burst.
+// It is shared by the initial wiring and by SetLimits so every rate change is
+// paired with a burst that scales to it — inheriting a stale burst (notably an
+// unlimited bucket's 0, which SetRate clamps to 1) would throttle the whole
+// download to ~1KiB/s.
+func BandwidthBurst(limit int64) int64 {
+	if limit <= 0 {
+		return 0
+	}
+	if b := limit / 2; b > bandwidthMinBurst {
+		return b
+	}
+	return bandwidthMinBurst
+}
+
 func DefaultLimits() Limits {
 	return Limits{
 		MaxBandwidthBps:    0,

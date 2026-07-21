@@ -138,9 +138,11 @@ func createEmptyFile(path string) error {
 	return nil
 }
 
-// syncFile fsyncs a single (already complete) file.
+// syncFile fsyncs a single (already complete) file. It opens O_RDWR, not
+// read-only: Windows FlushFileBuffers requires a handle with write access, so
+// an os.Open (read-only) handle fails f.Sync() with ERROR_ACCESS_DENIED.
 func syncFile(path string) error {
-	f, err := os.Open(path)
+	f, err := os.OpenFile(path, os.O_RDWR, 0)
 	if err != nil {
 		return fmt.Errorf("cache: open %s: %w", path, err)
 	}

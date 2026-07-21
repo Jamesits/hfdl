@@ -576,6 +576,22 @@ func (e *testEnv) installedSnapshotPath(repo, rev, sha, path string) string {
 		"models--"+strings.ReplaceAll(repo, "/", "--"), "snapshots", sha, path)
 }
 
+// resolvedTempDir is t.TempDir() with symlinks/short-names resolved, matching
+// how the manager canonicalizes reference paths (statReference stores the
+// EvalSymlinks result). Without this a test that queries reference_files by the
+// raw temp path finds no rows where the two forms diverge: macOS /var vs
+// /private/var, and Windows 8.3 short names (%TEMP% is C:\Users\RUNNER~1\...
+// but EvalSymlinks expands it to the long form).
+func resolvedTempDir(t *testing.T) string {
+	t.Helper()
+	dir := t.TempDir()
+	resolved, err := filepath.EvalSymlinks(dir)
+	if err != nil {
+		t.Fatalf("resolve temp dir: %v", err)
+	}
+	return resolved
+}
+
 // makeContent builds deterministic pseudo-random content of n bytes.
 func makeContent(n int, seedByte byte) []byte {
 	b := make([]byte, n)

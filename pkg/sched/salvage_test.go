@@ -18,7 +18,7 @@ func TestSalvageWholeFile(t *testing.T) {
 	env := newTestEnv(t, hub)
 	ctx := t.Context()
 
-	refDir := t.TempDir()
+	refDir := resolvedTempDir(t)
 	refPath := filepath.Join(refDir, "local-copy.bin")
 	if err := os.WriteFile(refPath, content, 0o644); err != nil {
 		t.Fatal(err)
@@ -69,7 +69,7 @@ func TestSalvageCorruptReference(t *testing.T) {
 	env := newTestEnv(t, hub)
 	ctx := t.Context()
 
-	refDir := t.TempDir()
+	refDir := resolvedTempDir(t)
 	refPath := filepath.Join(refDir, "local-copy.bin")
 	if err := os.WriteFile(refPath, content, 0o644); err != nil {
 		t.Fatal(err)
@@ -150,7 +150,7 @@ func TestSalvageRejectsCacheAndDest(t *testing.T) {
 		t.Fatal(err)
 	}
 	// A symlink in the reference dir pointing into the cache.
-	refDir := t.TempDir()
+	refDir := resolvedTempDir(t)
 	linkPath := filepath.Join(refDir, "via-symlink.bin")
 	if err := os.Symlink(insideCache, linkPath); err != nil {
 		t.Fatal(err)
@@ -206,7 +206,7 @@ func TestSalvageSizeGate(t *testing.T) {
 	env := newTestEnv(t, hub)
 	ctx := t.Context()
 
-	refDir := t.TempDir()
+	refDir := resolvedTempDir(t)
 	// 42 bytes: no target has this size.
 	oddPath := filepath.Join(refDir, "odd-size.bin")
 	if err := os.WriteFile(oddPath, makeContent(42, 97), 0o644); err != nil {
@@ -254,7 +254,7 @@ func TestReferenceHashReuseAcrossRuns(t *testing.T) {
 	env := newTestEnv(t, hub)
 	ctx := t.Context()
 
-	refDir := t.TempDir()
+	refDir := resolvedTempDir(t)
 	refPath := filepath.Join(refDir, "local-copy.bin")
 	if err := os.WriteFile(refPath, content, 0o644); err != nil {
 		t.Fatal(err)
