@@ -43,8 +43,8 @@ type CLI struct {
 	NoTUI      bool
 }
 
-// CacheDir resolves --cache-dir → HF_HUB_CACHE → HF_HOME/hub →
-// ~/.cache/huggingface/hub (huggingface_hub parity).
+// CacheDir resolves --cache-dir → HF_HUB_CACHE → <HF_HOME>/hub (huggingface_hub
+// parity; see constants.py HF_HUB_CACHE / HF_HOME).
 func CacheDir(flag string, getenv func(string) string) string {
 	if flag != "" {
 		return flag
@@ -52,13 +52,24 @@ func CacheDir(flag string, getenv func(string) string) string {
 	if v := getenv("HF_HUB_CACHE"); v != "" {
 		return v
 	}
+	return filepath.Join(hfHome(getenv), "hub")
+}
+
+// hfHome mirrors huggingface_hub constants.HF_HOME: $HF_HOME →
+// $XDG_CACHE_HOME/huggingface → ~/.cache/huggingface. The XDG_CACHE_HOME step
+// matters on Linux, where a user may relocate the whole cache tree via XDG
+// without setting any HF_* variable.
+func hfHome(getenv func(string) string) string {
 	if home := getenv("HF_HOME"); home != "" {
-		return filepath.Join(home, "hub")
+		return home
+	}
+	if xdg := getenv("XDG_CACHE_HOME"); xdg != "" {
+		return filepath.Join(xdg, "huggingface")
 	}
 	if home, err := os.UserHomeDir(); err == nil {
-		return filepath.Join(home, ".cache", "huggingface", "hub")
+		return filepath.Join(home, ".cache", "huggingface")
 	}
-	return filepath.Join(".cache", "huggingface", "hub")
+	return filepath.Join(".cache", "huggingface")
 }
 
 // Endpoints resolves repeatable --endpoint → HF_ENDPOINT → DefaultEndpoint.

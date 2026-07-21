@@ -137,7 +137,9 @@ type downloadPlan struct {
 
 func buildPlan(f *downloadFlags, getenv func(string) string) (*downloadPlan, error) {
 	if f.localDir != "" && f.cacheDirFlag != "" {
-		return nil, fmt.Errorf("--local-dir and --cache-dir are mutually exclusive")
+		return nil, fmt.Errorf("--local-dir and --cache-dir cannot be used together: " +
+			"use --cache-dir (or $HF_HOME) for shared caching, " +
+			"or --local-dir for a one-off download to a specific directory")
 	}
 
 	var repoType hfapi.RepoType
