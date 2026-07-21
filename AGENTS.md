@@ -9,11 +9,12 @@ High-speed Hugging Face downloader.
 - Use uptrace/bun for ORM
 
 ## Code Style
-- Use comments to document higher-level intent; package-level comments
-- Keep `cmd/*` lean, organize features into packages
+- Use comments to document higher-level intent; package-level comments should go into a separate `package.go` file
+- Keep different logical segments of the same package in different files
 - Avoid using `context.Background()`, `context.TODO()` or `nil` context in packages, use the context from caller
-- Use `log/slog` for logging; always pass the logger from upstream to downstream, never use your own logger in the package; if logged arguments contain slices, wrap it with `logging.JSONValue` to keep spaces visible
-- Run `go vet ./...` (must be run in `GOOS`/`GOARCH` matrix), `golangci-lint run` and `go fmt ./...` after code change
+- Use `log/slog` for logging; if logged arguments contain slices, wrap it with `logging.JSONValue` to keep spaces visible
+- Common hookable types e.g. logger, context and `http.Client` must always be passed from upstream to downstream; downstream packages should never create internal ones
+- Keep `cmd/*` lean, organize features into packages
 
-## Compilation
-Always perform a full rebuild with `goreleaser build --snapshot --clean`, and use the artifacts under `dist/`. When compiling individual programs for testing, output to `out/`.
+## Development
+Always perform a full rebuild with `goreleaser build --snapshot --clean`, and use the artifacts under `dist/`. When compiling individual programs for testing, output to `out/`. Run `go vet ./...` (must be run in `GOOS`/`GOARCH` matrix), `golangci-lint run` and `go fmt ./...` after code change.
