@@ -4,7 +4,7 @@ go 1.26.5
 
 require (
 	charm.land/bubbletea/v2 v2.0.8
-	github.com/charmbracelet/lipgloss v1.1.0
+	github.com/charmbracelet/lipgloss/v2 v2.0.5
 	github.com/dustin/go-humanize v1.0.1
 	github.com/oklog/ulid/v2 v2.1.1
 	github.com/pierrec/lz4/v4 v4.1.27
