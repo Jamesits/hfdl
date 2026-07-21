@@ -42,48 +42,32 @@ jobs:
         run: |
           go test -race -count=1 ./...
 
+      - name: go vet
+        # Build-tagged platform code (pkg/fcio, pkg/sched, pkg/store, pkg/cache,
+        # cmd) must compile cleanly on every GOOS/GOARCH we ship. This job
+        # already runs natively on linux, darwin and windows, so we reuse each
+        # runner's native GOOS (via `go env GOOS`) and only iterate over GOARCH.
+        # The three OS runners together cover the full matrix AGENTS.md requires,
+        # including combos with no native runner (e.g. linux/arm64,
+        # darwin/amd64, windows/arm64). We do not stop at the first failure:
+        # every arch runs and failures are reported together at the end.
+        shell: bash
+        run: |
+          goos="$(go env GOOS)"
+          failed=""
+          for goarch in amd64 arm64; do
+            echo "::group::go vet ${goos}/${goarch}"
+            if ! GOOS="${goos}" GOARCH="${goarch}" go vet ./...; then
+              failed="${failed} ${goos}/${goarch}"
+            fi
+            echo "::endgroup::"
+          done
+          if [ -n "${failed}" ]; then
+            echo "go vet failed for:${failed}"
+            exit 1
+          fi
+
       - name: Run linters
         uses: golangci/golangci-lint-action@v9
         with:
           version: latest
-
-  # Cross-compile vet: the test job above runs native tests on
-  # linux/amd64, windows/amd64 and darwin/arm64, but build-tagged
-  # platform code (pkg/fcio, pkg/sched, pkg/store, pkg/cache, cmd) must
-  # compile cleanly on every GOOS/GOARCH we ship — including combos with
-  # no native runner (darwin/amd64, linux/arm64, windows/arm64). AGENTS.md
-  # requires `go vet` across the matrix.
-  vet:
-    name: Vet (${{ matrix.goos }}/${{ matrix.goarch }})
-    runs-on: ubuntu-latest
-    timeout-minutes: 10
-    strategy:
-      fail-fast: false
-      matrix:
-        goos:
-          - linux
-          - windows
-          - darwin
-        goarch:
-          - amd64
-          - arm64
-    steps:
-      - name: Harden Runner
-        uses: step-security/harden-runner@bf7454d06d71f1098171f2acdf0cd4708d7b5920 # v2.20.0
-        with:
-          egress-policy: audit
-
-      - uses: actions/checkout@v7
-
-      - uses: actions/setup-go@v7
-        with:
-          go-version-file: 'go.mod'
-          cache: false
-
-      - run: go mod download
-
-      - name: go vet
-        env:
-          GOOS: ${{ matrix.goos }}
-          GOARCH: ${{ matrix.goarch }}
-        run: go vet ./...
