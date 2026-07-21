@@ -84,7 +84,7 @@ func newDownloadCmd() *cobra.Command {
 	}
 
 	fl := cmd.Flags()
-	// Upstream parity flags (doc/parity.md).
+	// Drop-in upstream flags
 	fl.StringVar(&f.repoType, "repo-type", string(hfapi.RepoTypeModel), "repo type: model|dataset|space")
 	fl.StringVar(&f.revision, "revision", "main", "git revision (branch, tag or commit)")
 	fl.StringArrayVar(&f.include, "include", nil, "glob patterns of files to include")
@@ -97,23 +97,23 @@ func newDownloadCmd() *cobra.Command {
 	fl.BoolVar(&f.dryRun, "dry-run", false, "resolve and list what would be downloaded, then exit")
 	fl.IntVar(&f.maxWorkers, "max-workers", dfl.MaxWorkers, "files downloaded concurrently")
 
-	// hfdl extensions.
-	fl.StringArrayVar(&f.endpointFlags, "endpoint", nil, "Hub endpoint URL (repeatable; mirrors after the first; default $HF_ENDPOINT)")
-	fl.IntVar(&f.connections, "connections", dfl.Conns, "block connections per file")
-	fl.StringVar(&f.blockSizeStr, "block-size", "", "download block size (default: adaptive 4MiB-64MiB)")
-	fl.StringVar(&f.policyStr, "upstream-policy", config.BestSpeed.String(), "per-block upstream selection: best-speed|random|round-robin")
-	fl.StringArrayVar(&f.references, "reference", nil, "local file/dir to salvage whole-file matches from (repeatable)")
-	fl.StringVar(&f.bandwidthStr, "max-bandwidth", "", "global download bandwidth cap (e.g. 500MiB/s; default unlimited)")
-	fl.Int64Var(&f.apiIOPS, "api-iops", dfl.APIIOPS, "HF API requests per second (burst 10)")
-	fl.IntVar(&f.diskActive, "disk-active", dfl.DiskActivePct, "disk duty-cycle ceiling 1-100 (percent)")
-	fl.DurationVar(&f.stallTimeout, "stall-timeout", dfl.StallTimeout, "idle-read stall window")
-	fl.StringVar(&f.stallMinStr, "stall-min-bytes", "32KiB", "minimum bytes per stall window before a connection is killed")
-	fl.StringVar(&f.ioModeStr, "io-mode", config.IOAuto.String(), "storage IO mode: auto|direct|sequential")
-	fl.StringVar(&f.ioBufferStr, "io-buffer", "", "RAM write-cache pool cap (default auto: clamp(slab*connections*2, 64MiB, 1GiB))")
-	fl.DurationVar(&f.checkpointIntv, "checkpoint-interval", dfl.CheckpointInterval, "durable progress cadence (flush/fsync/persist)")
-	fl.StringVar(&f.stateDBFlag, "state-db", "", "state database path (default <cache>/.hfdl/state.db)")
-	fl.StringVar(&f.logLevelStr, "log-level", "info", "log level: debug|info|warn|error")
-	fl.BoolVar(&f.noTUI, "no-tui", false, "disable the interactive TUI")
+	// hfdl extensions (must start with hfdl)
+	fl.StringArrayVar(&f.endpointFlags, "hfdl-endpoint", nil, "Hub endpoint URL (repeatable; mirrors after the first; default $HF_ENDPOINT)")
+	fl.IntVar(&f.connections, "hfdl-connections", dfl.Conns, "block connections per file")
+	fl.StringVar(&f.blockSizeStr, "hfdl-block-size", "", "download block size (default: adaptive 4MiB-64MiB)")
+	fl.StringVar(&f.policyStr, "hfdl-upstream-policy", config.BestSpeed.String(), "per-block upstream selection: best-speed|random|round-robin")
+	fl.StringArrayVar(&f.references, "hfdl-reference", nil, "local file/dir to salvage whole-file matches from (repeatable)")
+	fl.StringVar(&f.bandwidthStr, "hfdl-max-bandwidth", "", "global download bandwidth cap (e.g. 500MiB/s; default unlimited)")
+	fl.Int64Var(&f.apiIOPS, "hfdl-api-iops", dfl.APIIOPS, "HF API requests per second (burst 10)")
+	fl.IntVar(&f.diskActive, "hfdl-disk-active", dfl.DiskActivePct, "disk duty-cycle ceiling 1-100 (percent)")
+	fl.DurationVar(&f.stallTimeout, "hfdl-stall-timeout", dfl.StallTimeout, "idle-read stall window")
+	fl.StringVar(&f.stallMinStr, "hfdl-stall-min-bytes", "32KiB", "minimum bytes per stall window before a connection is killed")
+	fl.StringVar(&f.ioModeStr, "hfdl-io-mode", config.IOAuto.String(), "storage IO mode: auto|direct|sequential")
+	fl.StringVar(&f.ioBufferStr, "hfdl-io-buffer", "", "RAM write-cache pool cap (default auto: clamp(slab*connections*2, 64MiB, 1GiB))")
+	fl.DurationVar(&f.checkpointIntv, "hfdl-checkpoint-interval", dfl.CheckpointInterval, "durable progress cadence (flush/fsync/persist)")
+	fl.StringVar(&f.stateDBFlag, "hfdl-state-db", "", "state database path (default <cache>/.hfdl/state.db)")
+	fl.StringVar(&f.logLevelStr, "hfdl-log-level", "info", "log level: debug|info|warn|error")
+	fl.BoolVar(&f.noTUI, "hfdl-no-tui", false, "disable the interactive TUI")
 	return cmd
 }
 
