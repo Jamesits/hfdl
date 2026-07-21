@@ -357,7 +357,7 @@ func TestHelpers(t *testing.T) {
 	if clamp(5, 10, 20) != 10 || clamp(25, 10, 20) != 20 || clamp(15, 10, 20) != 15 {
 		t.Fatal("clamp broken")
 	}
-	if ioTier(config.IOAuto) != fcio.TierAuto || ioTier(config.IODirect) != fcio.TierDirect || ioTier(config.IOSequential) != fcio.TierPlain {
+	if ioTier(config.IOBuffered) != fcio.TierAuto || ioTier(config.IODirect) != fcio.TierDirect || ioTier(config.IOSequential) != fcio.TierPlain {
 		t.Fatal("ioTier mapping broken")
 	}
 	if mediaClass(fcio.FsSSD) != throttle.MediaSSD || mediaClass(fcio.FsHDD) != throttle.MediaHDD ||

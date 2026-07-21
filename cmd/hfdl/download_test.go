@@ -29,7 +29,7 @@ func baseFlags() *downloadFlags {
 		diskActive:     100,
 		stallTimeout:   15 * time.Second,
 		stallMinStr:    "32KiB",
-		ioModeStr:      "auto",
+		ioModeStr:      "buffered",
 		checkpointIntv: 30 * time.Second,
 		logLevelStr:    "info",
 	}

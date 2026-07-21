@@ -5,21 +5,22 @@ import (
 	"time"
 )
 
-// IOMode selects the fcio storage tier: auto is buffered IO + fadvise,
-// direct is the O_DIRECT opt-in, sequential the in-order fallback for
-// pathological storage. The zero value is IOAuto so a zero Limits is usable.
+// IOMode selects the fcio storage tier: buffered uses the OS page cache
+// plus fadvise hints, direct is the O_DIRECT opt-in, sequential the
+// in-order fallback for pathological storage. The zero value is IOBuffered
+// so a zero Limits is usable.
 type IOMode int
 
 const (
-	IOAuto       IOMode = iota // buffered IO + fadvise (default)
+	IOBuffered   IOMode = iota // buffered IO + fadvise (default)
 	IODirect                   // O_DIRECT / FILE_FLAG_NO_BUFFERING opt-in
 	IOSequential               // in-order fallback for pathological storage
 )
 
 func (m IOMode) String() string {
 	switch m {
-	case IOAuto:
-		return "auto"
+	case IOBuffered:
+		return "buffered"
 	case IODirect:
 		return "direct"
 	case IOSequential:
@@ -30,14 +31,14 @@ func (m IOMode) String() string {
 
 func ParseIOMode(s string) (IOMode, error) {
 	switch s {
-	case "auto":
-		return IOAuto, nil
+	case "buffered":
+		return IOBuffered, nil
 	case "direct":
 		return IODirect, nil
 	case "sequential":
 		return IOSequential, nil
 	}
-	return IOAuto, fmt.Errorf("invalid io-mode %q: want auto|direct|sequential", s)
+	return IOBuffered, fmt.Errorf("invalid io-mode %q: want buffered|direct|sequential", s)
 }
 
 // UpstreamPolicy is the per-block upstream selection strategy: which
@@ -110,7 +111,7 @@ func DefaultLimits() Limits {
 		StallMinBytes:      32 * 1024,
 		IOBuffer:           0,
 		CheckpointInterval: 30 * time.Second,
-		IOMode:             IOAuto,
+		IOMode:             IOBuffered,
 		UpstreamPolicy:     BestSpeed,
 	}
 }
