@@ -17,6 +17,19 @@ func getenvMap(m map[string]string) func(string) string {
 	return func(k string) string { return m[k] }
 }
 
+// absPath turns a slash-style golden path into the absolute OS-native path
+// buildPlan/finalPath produce (filepath.Abs). On Windows a rooted-but-driveless
+// path like /cache resolves against the current drive, so the expectation and
+// the production path absolutize against the same drive and agree.
+func absPath(t *testing.T, p string) string {
+	t.Helper()
+	a, err := filepath.Abs(filepath.FromSlash(p))
+	if err != nil {
+		t.Fatal(err)
+	}
+	return a
+}
+
 func baseFlags() *downloadFlags {
 	return &downloadFlags{
 		repoID:         "org/repo",
@@ -98,10 +111,11 @@ func TestBuildPlanFlagEnvMatrix(t *testing.T) {
 			name: "HF_HUB_CACHE env",
 			env:  map[string]string{"HF_HUB_CACHE": "/tmp/hfcache"},
 			check: func(t *testing.T, p *downloadPlan) {
-				if p.cacheDir != "/tmp/hfcache" {
+				want := absPath(t, "/tmp/hfcache")
+				if p.cacheDir != want {
 					t.Fatalf("cacheDir = %q", p.cacheDir)
 				}
-				if p.cli.StateDB != filepath.Join("/tmp/hfcache", ".hfdl", "state.db") {
+				if p.cli.StateDB != filepath.Join(want, ".hfdl", "state.db") {
 					t.Fatalf("stateDB = %q", p.cli.StateDB)
 				}
 			},
@@ -113,7 +127,7 @@ func TestBuildPlanFlagEnvMatrix(t *testing.T) {
 			},
 			env: map[string]string{"HF_HUB_CACHE": "/tmp/envcache"},
 			check: func(t *testing.T, p *downloadPlan) {
-				if p.cacheDir != "/tmp/flagcache" {
+				if want := absPath(t, "/tmp/flagcache"); p.cacheDir != want {
 					t.Fatalf("cacheDir = %q", p.cacheDir)
 				}
 			},
@@ -122,7 +136,7 @@ func TestBuildPlanFlagEnvMatrix(t *testing.T) {
 			name: "HF_HOME hub fallback",
 			env:  map[string]string{"HF_HOME": "/tmp/hfhome"},
 			check: func(t *testing.T, p *downloadPlan) {
-				if p.cacheDir != filepath.Join("/tmp/hfhome", "hub") {
+				if want := absPath(t, "/tmp/hfhome/hub"); p.cacheDir != want {
 					t.Fatalf("cacheDir = %q", p.cacheDir)
 				}
 			},
@@ -410,7 +424,7 @@ func TestFinalPath(t *testing.T) {
 		p := cachePlan(true)
 		snap := &sched.Stats{CommitSHA: "abc123"}
 		got := finalPath(p, snap)
-		want := "/cache/models--org--repo/snapshots/abc123/model.safetensors"
+		want := absPath(t, "/cache/models--org--repo/snapshots/abc123/model.safetensors")
 		if got != want {
 			t.Fatalf("got %q, want %q", got, want)
 		}
@@ -419,7 +433,7 @@ func TestFinalPath(t *testing.T) {
 		p := cachePlan(false)
 		snap := &sched.Stats{CommitSHA: "abc123"}
 		got := finalPath(p, snap)
-		want := "/cache/models--org--repo/snapshots/abc123"
+		want := absPath(t, "/cache/models--org--repo/snapshots/abc123")
 		if got != want {
 			t.Fatalf("got %q, want %q", got, want)
 		}
@@ -432,7 +446,7 @@ func TestFinalPath(t *testing.T) {
 			t.Fatal(err)
 		}
 		got := finalPath(p, &sched.Stats{CommitSHA: "deadbeef"})
-		want := "/cache/datasets--org--repo/snapshots/deadbeef"
+		want := absPath(t, "/cache/datasets--org--repo/snapshots/deadbeef")
 		if got != want {
 			t.Fatalf("got %q, want %q", got, want)
 		}
@@ -446,7 +460,7 @@ func TestFinalPath(t *testing.T) {
 			t.Fatal(err)
 		}
 		got := finalPath(p, &sched.Stats{})
-		if got != "/out/config.json" {
+		if want := absPath(t, "/out/config.json"); got != want {
 			t.Fatalf("got %q", got)
 		}
 	})
@@ -457,14 +471,14 @@ func TestFinalPath(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
-		if got := finalPath(p, &sched.Stats{}); got != "/out" {
+		if got := finalPath(p, &sched.Stats{}); got != absPath(t, "/out") {
 			t.Fatalf("got %q", got)
 		}
 	})
 	t.Run("nil snapshot falls back to revision", func(t *testing.T) {
 		p := cachePlan(false)
 		got := finalPath(p, nil)
-		want := "/cache/models--org--repo/snapshots/main"
+		want := absPath(t, "/cache/models--org--repo/snapshots/main")
 		if got != want {
 			t.Fatalf("got %q, want %q", got, want)
 		}
@@ -484,7 +498,7 @@ func TestFinalOutputParity(t *testing.T) {
 			t.Fatal(err)
 		}
 		got := finalPath(p, snap)
-		want := "/cache/models--org--repo/snapshots/abc123"
+		want := absPath(t, "/cache/models--org--repo/snapshots/abc123")
 		if got != want {
 			t.Fatalf("got %q, want %q", got, want)
 		}
@@ -497,7 +511,7 @@ func TestFinalOutputParity(t *testing.T) {
 			t.Fatal(err)
 		}
 		got := finalPath(p, snap)
-		want := "/cache/models--org--repo/snapshots/abc123"
+		want := absPath(t, "/cache/models--org--repo/snapshots/abc123")
 		if got != want {
 			t.Fatalf("got %q, want %q", got, want)
 		}
@@ -511,7 +525,7 @@ func TestFinalOutputParity(t *testing.T) {
 			t.Fatal(err)
 		}
 		got := finalPath(p, snap)
-		want := "/out/config.json"
+		want := absPath(t, "/out/config.json")
 		if got != want {
 			t.Fatalf("got %q, want %q", got, want)
 		}
@@ -526,7 +540,7 @@ func TestFinalOutputParity(t *testing.T) {
 			t.Fatal(err)
 		}
 		got := finalPath(p, snap)
-		want := "/out/config.json"
+		want := absPath(t, "/out/config.json")
 		if got != want {
 			t.Fatalf("got %q, want %q", got, want)
 		}

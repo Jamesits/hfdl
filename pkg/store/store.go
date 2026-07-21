@@ -7,6 +7,7 @@ import (
 	"net/url"
 	"os"
 	"path/filepath"
+	"strings"
 	"sync"
 	"time"
 
@@ -48,12 +49,26 @@ type Store struct {
 	closeErr  error
 }
 
-// dsn builds the modernc.org/sqlite file URI for path with the per-connection
-// pragma query. url.URL percent-encodes the path, so spaces or reserved
-// characters (?, #) in the state-db path never corrupt the DSN.
-func dsn(path string) string {
-	u := url.URL{Scheme: "file", Path: path, RawQuery: dsnQuery}
+// fileURI builds a modernc.org/sqlite file URI for path with rawQuery. Two
+// normalizations make it portable: filepath.ToSlash rewrites Windows
+// backslashes to the forward slashes SQLite's URI parser requires, and a
+// leading slash roots a drive path (C:/x → /C:/x) so the result is
+// file:///C:/x — an empty authority the parser accepts. A bare "file:"+path
+// would instead yield file://C:%5Cx, whose "C:" is read as the URI authority
+// ("invalid uri authority") on Windows. url.URL also percent-encodes the path,
+// so spaces or reserved characters (?, #) never corrupt the DSN.
+func fileURI(path, rawQuery string) string {
+	p := filepath.ToSlash(path)
+	if !strings.HasPrefix(p, "/") {
+		p = "/" + p
+	}
+	u := url.URL{Scheme: "file", Path: p, RawQuery: rawQuery}
 	return u.String()
+}
+
+// dsn is the state-database DSN: the file URI with the per-connection pragmas.
+func dsn(path string) string {
+	return fileURI(path, dsnQuery)
 }
 
 // Open opens (creating if needed) and migrates the state database at path.

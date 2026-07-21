@@ -19,7 +19,7 @@ func TestCacheDirPrecedence(t *testing.T) {
 	}{
 		{"flag wins", "/flag", map[string]string{"HF_HUB_CACHE": "/env", "HF_HOME": "/home"}, "/flag"},
 		{"HF_HUB_CACHE", "", map[string]string{"HF_HUB_CACHE": "/env", "HF_HOME": "/home"}, "/env"},
-		{"HF_HOME hub subdir", "", map[string]string{"HF_HOME": "/home"}, "/home/hub"},
+		{"HF_HOME hub subdir", "", map[string]string{"HF_HOME": "/home"}, filepath.Join("/home", "hub")},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			if got := CacheDir(tc.flag, envFrom(tc.env)); got != tc.want {

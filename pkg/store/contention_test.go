@@ -34,7 +34,7 @@ func TestBusyRetryAbsorbsSnapshot(t *testing.T) {
 
 	// A second connection WITHOUT _txlock=immediate: its txs stay deferred,
 	// so a read-then-write body can go stale under a concurrent commit.
-	raw, err := sql.Open(driverName, "file:"+s.path+"?_pragma=busy_timeout(5000)")
+	raw, err := sql.Open(driverName, fileURI(s.path, "_pragma=busy_timeout(5000)"))
 	if err != nil {
 		t.Fatal(err)
 	}
