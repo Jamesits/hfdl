@@ -6,7 +6,7 @@ import (
 	"testing"
 	"time"
 
-	tea "github.com/charmbracelet/bubbletea"
+	tea "charm.land/bubbletea/v2"
 	"github.com/charmbracelet/lipgloss"
 
 	"github.com/jamesits/hfdl/pkg/config"
@@ -16,22 +16,26 @@ var ansiRE = regexp.MustCompile("\x1b\\[[0-9;]*m")
 
 func stripANSI(s string) string { return ansiRE.ReplaceAllString(s, "") }
 
-func keyMsg(s string) tea.KeyMsg {
+// keyMsg builds a v2 key-press event. Special keys carry a Code rune constant;
+// printable keys carry both Code and Text (Text is what Key.String reports for
+// them, which handleKey switches on). All keys the UI binds are single-rune, so
+// []rune(s)[0] is the whole key.
+func keyMsg(s string) tea.KeyPressMsg {
 	switch s {
 	case "ctrl+c":
-		return tea.KeyMsg{Type: tea.KeyCtrlC}
+		return tea.KeyPressMsg{Code: 'c', Mod: tea.ModCtrl}
 	case "tab":
-		return tea.KeyMsg{Type: tea.KeyTab}
+		return tea.KeyPressMsg{Code: tea.KeyTab}
 	case "up":
-		return tea.KeyMsg{Type: tea.KeyUp}
+		return tea.KeyPressMsg{Code: tea.KeyUp}
 	case "down":
-		return tea.KeyMsg{Type: tea.KeyDown}
+		return tea.KeyPressMsg{Code: tea.KeyDown}
 	case "pgup":
-		return tea.KeyMsg{Type: tea.KeyPgUp}
+		return tea.KeyPressMsg{Code: tea.KeyPgUp}
 	case "pgdown":
-		return tea.KeyMsg{Type: tea.KeyPgDown}
+		return tea.KeyPressMsg{Code: tea.KeyPgDown}
 	default:
-		return tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune(s)}
+		return tea.KeyPressMsg{Code: []rune(s)[0], Text: s}
 	}
 }
 
@@ -87,7 +91,7 @@ func testSnapshot() *Snapshot {
 func TestInitialRenderContainsRepoBytesSpeed(t *testing.T) {
 	s := testSnapshot()
 	m := newModel(func() *Snapshot { return s }, nil, "0.1.0", Callbacks{})
-	v := stripANSI(m.View())
+	v := stripANSI(m.render())
 	for _, want := range []string{
 		"hfdl 0.1.0",
 		"org/repo@main",
@@ -117,7 +121,7 @@ func TestTickUpdatesSnapshot(t *testing.T) {
 	s.BytesDone = 30_000_000_000
 	s.GlobalRate = 1
 	m = tick(m)
-	v := stripANSI(m.View())
+	v := stripANSI(m.render())
 	if !strings.Contains(v, config.FormatSize(30_000_000_000)) {
 		t.Errorf("tick did not refresh bytes:\n%s", v)
 	}
@@ -147,14 +151,14 @@ func TestPauseToggleCallback(t *testing.T) {
 	if len(got) != 1 || got[0] != true {
 		t.Fatalf("one press = one call with true, got %v", got)
 	}
-	if !strings.Contains(stripANSI(m.View()), "paused") {
+	if !strings.Contains(stripANSI(m.render()), "paused") {
 		t.Error("paused state not reflected in header")
 	}
 	m = press(m, "p")
 	if len(got) != 2 || got[1] != false {
 		t.Fatalf("second press toggles back, got %v", got)
 	}
-	if strings.Contains(stripANSI(m.View()), "[paused]") {
+	if strings.Contains(stripANSI(m.render()), "[paused]") {
 		t.Error("paused flag should clear after second toggle")
 	}
 }
@@ -183,7 +187,7 @@ func TestTabSwitchToLogs(t *testing.T) {
 	if m.tab != tabLogs {
 		t.Fatal("l switches to logs")
 	}
-	if !strings.Contains(stripANSI(m.View()), "Logs") {
+	if !strings.Contains(stripANSI(m.render()), "Logs") {
 		t.Error("logs view not rendered")
 	}
 	m = press(m, "tab")
@@ -222,7 +226,7 @@ func TestResizeKeepsRenderInBounds(t *testing.T) {
 			if tabKey != "" {
 				m = press(m, tabKey)
 			}
-			v := m.View()
+			v := m.render()
 			lines := strings.Split(v, "\n")
 			if len(lines) > h {
 				t.Errorf("%dx%d tab=%q: %d lines > height", w, h, tabKey, len(lines))
@@ -244,7 +248,7 @@ func TestCooldownAndENOSPCRendering(t *testing.T) {
 		{Target: "hf.co", Kind: "http_429", Remaining: 12 * time.Second},
 	}
 	m := newModel(func() *Snapshot { return s }, nil, "x", Callbacks{})
-	v := stripANSI(m.View())
+	v := stripANSI(m.render())
 	if !strings.Contains(v, "429: hf.co 12s") {
 		t.Errorf("429 cooldown countdown missing:\n%s", v)
 	}
@@ -254,7 +258,7 @@ func TestCooldownAndENOSPCRendering(t *testing.T) {
 	// 429 hidden when nothing is cooling down
 	s.Cooldowns = nil
 	m = tick(m)
-	if strings.Contains(stripANSI(m.View()), "429:") {
+	if strings.Contains(stripANSI(m.render()), "429:") {
 		t.Error("empty cooldown should omit the 429 segment")
 	}
 }

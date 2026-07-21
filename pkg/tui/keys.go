@@ -1,14 +1,14 @@
 package tui
 
 import (
-	tea "github.com/charmbracelet/bubbletea"
+	tea "charm.land/bubbletea/v2"
 )
 
 // Key map: q/ctrl+c quit everywhere; l/tab toggle dashboard↔logs;
 // dashboard: p pause toggle, +/- bandwidth ∓10%; logs: e level-filter cycle,
 // arrows/pgup/pgdn scroll (drops follow), G back to follow mode.
 
-func (m model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
+func (m model) handleKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 	switch msg.String() {
 	case "ctrl+c", "q":
 		return m, tea.Quit
@@ -37,7 +37,7 @@ func (m *model) switchTab() {
 	m.tab = tabDashboard
 }
 
-func (m model) handleDashboardKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
+func (m model) handleDashboardKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 	switch msg.String() {
 	case "p":
 		m.paused = !m.paused
@@ -56,7 +56,7 @@ func (m model) handleDashboardKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	return m, nil
 }
 
-func (m model) handleLogsKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
+func (m model) handleLogsKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 	page := m.logsPageSize()
 	switch msg.String() {
 	case "e":

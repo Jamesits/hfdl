@@ -5,7 +5,7 @@ import (
 	"errors"
 	"time"
 
-	tea "github.com/charmbracelet/bubbletea"
+	tea "charm.land/bubbletea/v2"
 
 	"github.com/jamesits/hfdl/pkg/config"
 	"github.com/jamesits/hfdl/pkg/logging"
@@ -158,13 +158,22 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case tickMsg:
 		m.poll()
 		return m, tickCmd()
-	case tea.KeyMsg:
+	case tea.KeyPressMsg:
 		return m.handleKey(msg)
 	}
 	return m, nil
 }
 
-func (m model) View() string {
+// View wraps render's string in a tea.View: v2's Model.View returns a View
+// (a styled string plus optional cursor/altscreen/color metadata) rather than
+// a bare string. We only ever set content, so the frame renders inline just
+// as it did under v1 (no altscreen).
+func (m model) View() tea.View { return tea.NewView(m.render()) }
+
+// render composes the active tab's frame as a styled string. It is View's
+// string-producing core, exposed separately so tests assert on content
+// without unwrapping a tea.View.
+func (m model) render() string {
 	if m.tab == tabLogs {
 		return m.logsView()
 	}
