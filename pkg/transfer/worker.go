@@ -525,14 +525,21 @@ func (fd *fileDownload) gatedWriteBuf(buf *fcio.Buf, off int64) error {
 }
 
 // committed records a flushed range: in-memory IntervalSet (persisted at
-// the next checkpoint), Tier C watermark advance, and the test hook.
+// the next checkpoint), the test hook, and the Tier C watermark advance.
+//
+// Order matters (Sequential): the hook must fire before seqAdvance. The
+// underlying writes are already gated in offset order by seqWait, but
+// seqAdvance releases the next block's seqWait — so advancing first would let
+// the woken worker record its own offset through the hook before this one
+// does, surfacing a spurious out-of-order observation. Recording first pins
+// the hook order to the (correct) write order the watermark enforces.
 func (fd *fileDownload) committed(off, n int64) {
 	fd.intervals.add(off, off+n)
-	if fd.task.Sequential {
-		fd.seqAdvance(off + n)
-	}
 	if h := fd.flushHook.Load(); h != nil {
 		(*h)(off, n)
+	}
+	if fd.task.Sequential {
+		fd.seqAdvance(off + n)
 	}
 }
 
