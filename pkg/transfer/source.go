@@ -143,6 +143,7 @@ type httpSource struct {
 	upstreams     []*Upstream
 	policy        config.UpstreamPolicy
 	headerTimeout time.Duration
+	blacklistTTL  time.Duration
 	rng           *rand.Rand
 
 	mu        sync.Mutex
@@ -156,7 +157,7 @@ type httpSource struct {
 
 // newHTTPSource builds the source. seed drives Random/BestSpeed exploration;
 // tests pass a fixed seed for deterministic distributions.
-func newHTTPSource(log *slog.Logger, hc *http.Client, t *FileTask, headerTimeout time.Duration, seed [32]byte) *httpSource {
+func newHTTPSource(log *slog.Logger, hc *http.Client, t *FileTask, headerTimeout, blacklistTTL time.Duration, seed [32]byte) *httpSource {
 	s := &httpSource{
 		log:           log,
 		repo:          t.Repo,
@@ -167,6 +168,7 @@ func newHTTPSource(log *slog.Logger, hc *http.Client, t *FileTask, headerTimeout
 		upstreams:     t.Upstreams,
 		policy:        t.Policy,
 		headerTimeout: headerTimeout,
+		blacklistTTL:  blacklistTTL,
 		rng:           rand.New(rand.NewChaCha8(seed)),
 		ema:           make(map[string]float64, len(t.Upstreams)),
 		pins:          make(map[string]string),
@@ -577,7 +579,7 @@ func (s *httpSource) setCooldown(endpoint string, until time.Time) {
 // validation error so the next block for this file goes elsewhere.
 // It never shortens a longer existing park (e.g. a 429 30s cooldown).
 func (s *httpSource) blacklist(endpoint string) {
-	until := time.Now().Add(upstreamBlacklistTTL)
+	until := time.Now().Add(s.blacklistTTL)
 	s.mu.Lock()
 	if cur, ok := s.cooldown[endpoint]; !ok || until.After(cur) {
 		s.cooldown[endpoint] = until

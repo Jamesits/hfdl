@@ -450,6 +450,11 @@ func newTestEnvLog(t *testing.T, hub *fixtureHub, log *slog.Logger, opts ...envO
 		Bandwidth: bw, Stats: reg, Engine: engine, Pool: pool,
 		CheckpointInterval: 50 * time.Millisecond,
 		HeaderTimeout:      5 * time.Second,
+		// Collapse the retry pacing/blacklist so a single-upstream stall or
+		// timeout recovers in milliseconds instead of waiting out the 5s
+		// blacklist plus exponential backoff (CI wall-clock).
+		RetryBackoffBase:     5 * time.Millisecond,
+		UpstreamBlacklistTTL: 20 * time.Millisecond,
 	})
 	verifier := verify.NewChecker(engine, pool, duty, log, nil)
 	installer := cache.NewInstaller(cs, engine, volumes, duty, log, nil)
@@ -506,6 +511,10 @@ func (e *testEnv) rebuild(t *testing.T) *Manager {
 		Bandwidth: e.bw, Stats: e.reg, Engine: engine, Pool: pool,
 		CheckpointInterval: 50 * time.Millisecond,
 		HeaderTimeout:      5 * time.Second,
+		// Match newTestEnvLog: fast retry pacing so restart-flow tests do not
+		// wait out the production blacklist/backoff.
+		RetryBackoffBase:     5 * time.Millisecond,
+		UpstreamBlacklistTTL: 20 * time.Millisecond,
 	})
 	return NewManager(ManagerConfig{
 		Store:      e.st,

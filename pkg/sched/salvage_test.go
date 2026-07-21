@@ -61,10 +61,12 @@ func TestSalvageWholeFile(t *testing.T) {
 // TestSalvageCorruptReference: a reference that changes after hashing
 // salvages bad bytes; the mandatory hash verify catches it, the file falls
 // back to the network, and the final output is never the corrupt content.
-// The reference is large so the apply pass is still reading when the test
-// corrupts it — no reliance on sub-millisecond interleavings.
+// The reference is sized so the apply pass is still reading when the test
+// corrupts it — the salvage startup (lease → match → acquireRW) plus the copy
+// of tens of MiB comfortably outlasts the test's DB-poll + two pwrites, so the
+// tail page lands corrupt no reliance on sub-millisecond interleavings.
 func TestSalvageCorruptReference(t *testing.T) {
-	content := makeContent(128<<20, 73)
+	content := makeContent(32<<20, 73)
 	hub := newFixtureHub(t, map[string][]byte{"m.bin": content}, "m.bin")
 	env := newTestEnv(t, hub)
 	ctx := t.Context()

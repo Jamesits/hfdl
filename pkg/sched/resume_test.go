@@ -159,7 +159,10 @@ func TestRecoverStartupRequeues(t *testing.T) {
 // TestSetLimitsHot: bandwidth bucket and per-file conns update live; pause
 // suspends the download and install queues.
 func TestSetLimitsHot(t *testing.T) {
-	want := makeContent(8<<20, 43)
+	// 4 MiB = four 1 MiB blocks: enough to observe Conns grow past 1 while the
+	// download is in flight, without paying the race detector's per-byte cost
+	// of a larger transfer.
+	want := makeContent(4<<20, 43)
 	hub := newFixtureHub(t, map[string][]byte{"big.bin": want}, "big.bin")
 	hub.delay = 30 * time.Millisecond
 	env := newTestEnv(t, hub, withLimits(func(l *config.Limits) { l.Conns = 1 }))

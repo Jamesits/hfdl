@@ -14,7 +14,7 @@ import (
 
 // newTestHTTPSource builds an httpSource against the given upstream URLs.
 func newTestHTTPSource(task *FileTask, seed [32]byte) *httpSource {
-	return newHTTPSource(slog.New(slog.DiscardHandler), &http.Client{}, task, 2*time.Second, seed)
+	return newHTTPSource(slog.New(slog.DiscardHandler), &http.Client{}, task, 2*time.Second, defaultUpstreamBlacklistTTL, seed)
 }
 
 func testSeed(b byte) [32]byte {
@@ -357,7 +357,7 @@ func TestHeaderTimeout(t *testing.T) {
 	}))
 	defer slow.Close()
 	task := taskFor(nil, 1000, slow.URL)
-	src := newHTTPSource(slog.New(slog.DiscardHandler), &http.Client{}, task, 50*time.Millisecond, testSeed(9))
+	src := newHTTPSource(slog.New(slog.DiscardHandler), &http.Client{}, task, 50*time.Millisecond, defaultUpstreamBlacklistTTL, testSeed(9))
 	_, err := src.Open(t.Context(), 0, 100)
 	var ae *AttemptError
 	if !errors.As(err, &ae) || ae.Kind != FailHeaderTimeout {

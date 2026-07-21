@@ -292,18 +292,23 @@ func (e *eventLog) find(kind EventKind) (Event, bool) {
 }
 
 // testDownloader builds a Downloader with small slabs and no checkpoint
-// ticker (tests control checkpoints explicitly).
+// ticker (tests control checkpoints explicitly). The retry backoff and
+// upstream blacklist are collapsed to milliseconds: single-upstream retry
+// paths otherwise wait out the 5s production blacklist plus a ~1s+2s+4s
+// backoff schedule, which dominated the package's wall-clock in CI.
 func testDownloader(t *testing.T) *Downloader {
 	t.Helper()
 	return NewDownloader(Config{
-		Log:                slog.New(slog.DiscardHandler),
-		HTTP:               &http.Client{},
-		Bandwidth:          throttle.NewBucket(0, 0),
-		Stats:              stats.New(),
-		Pool:               fcio.NewPool(64<<10, 4<<20),
-		CheckpointInterval: time.Hour,
-		HeaderTimeout:      2 * time.Second,
-		Prov:               otel.Noop(),
+		Log:                  slog.New(slog.DiscardHandler),
+		HTTP:                 &http.Client{},
+		Bandwidth:            throttle.NewBucket(0, 0),
+		Stats:                stats.New(),
+		Pool:                 fcio.NewPool(64<<10, 4<<20),
+		CheckpointInterval:   time.Hour,
+		HeaderTimeout:        2 * time.Second,
+		RetryBackoffBase:     5 * time.Millisecond,
+		UpstreamBlacklistTTL: 20 * time.Millisecond,
+		Prov:                 otel.Noop(),
 	})
 }
 

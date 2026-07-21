@@ -25,6 +25,10 @@ func setupENOSPCEpisode(t *testing.T, cap *logCapture) (*Manager, context.Contex
 	runCtx, cancel := context.WithCancel(t.Context())
 	env.manager.detached = context.WithoutCancel(runCtx)
 	env.manager.enospcPoll = 2 * time.Millisecond
+	// Cap the probe backoff too: with only the fast poll set, a long give-up
+	// bound (e.g. 11 probes) lets the 2ms base double to ~2s and the episode
+	// spends seconds sleeping. Tests that want a specific cap override this.
+	env.manager.probeBackoffMax = 64 * time.Millisecond
 	return env.manager, runCtx, cancel
 }
 

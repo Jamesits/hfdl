@@ -217,11 +217,14 @@ func (fd *fileDownload) handleOpenError(ws *workerState, b Block, attempt int, e
 			fd.retryBlock(b, attempt, ae, span)
 			fd.d.emit(fd.detached, Event{FileID: fd.task.FileID, BlockID: b.ID, Kind: EventRangeless, Upstream: ae.Upstream, Err: ae})
 		case FailNoHealthy:
-			// Every upstream cooling down/blacklisted: wait it out.
-			fd.requeue(b, retryBackoff(attempt), ae)
+			// Every upstream cooling down/blacklisted: wait it out. Compute the
+			// backoff once — retryBackoff jitters, so a second call would log a
+			// value different from the one actually applied.
+			bo := fd.retryBackoff(attempt)
+			fd.requeue(b, bo, ae)
 			span.AddEvent("requeue", trace.WithAttributes(
 				attribute.String("reason", ae.Err.Error()),
-				attribute.String("backoff", retryBackoff(attempt).String())))
+				attribute.String("backoff", bo.String())))
 			span.SetStatus(codes.Ok, "")
 		default:
 			// Net/header/status/validation: penalize and retry elsewhere.
@@ -289,7 +292,7 @@ func (fd *fileDownload) handleStreamError(ws *workerState, b Block, attempt int,
 // retryBlock requeues with backoff and records the retry convention on the
 // span: retried failures end Ok with a retry event; Error is terminal only.
 func (fd *fileDownload) retryBlock(b Block, attempt int, cause error, span trace.Span) {
-	bo := retryBackoff(attempt)
+	bo := fd.retryBackoff(attempt)
 	fd.requeue(b, bo, cause)
 	span.AddEvent("retry", trace.WithAttributes(
 		attribute.String("reason", cause.Error()),
@@ -314,14 +317,17 @@ func (fd *fileDownload) startFallback() {
 	}
 }
 
+// retryBackoffMax caps the per-item exponential backoff.
+const retryBackoffMax = 30 * time.Second
+
 // retryBackoff is the per-item exponential backoff (±20% jitter, capped) the
-// leaser applies via blocks.available_at.
-func retryBackoff(attempt int) time.Duration {
-	const base = 500 * time.Millisecond
-	const max = 30 * time.Second
-	d := base << min(attempt, 6)
-	if d > max {
-		d = max
+// leaser applies via blocks.available_at. The base is Config.RetryBackoffBase
+// (production 500ms; tests shrink it) so the doubling schedule collapses under
+// test without touching production pacing.
+func (fd *fileDownload) retryBackoff(attempt int) time.Duration {
+	d := fd.d.cfg.RetryBackoffBase << min(attempt, 6)
+	if d > retryBackoffMax {
+		d = retryBackoffMax
 	}
 	return time.Duration(float64(d) * (0.8 + 0.4*rand.Float64()))
 }
@@ -641,7 +647,7 @@ func (fd *fileDownload) runFallback(ctx context.Context) error {
 			return term
 		}
 		select {
-		case <-time.After(retryBackoff(attempt)):
+		case <-time.After(fd.retryBackoff(attempt)):
 		case <-ctx.Done():
 			return ctx.Err()
 		}

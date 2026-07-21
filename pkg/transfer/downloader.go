@@ -31,6 +31,10 @@ const (
 	defaultStallWindow        = 15 * time.Second
 	defaultStallMinBytes      = 32 << 10
 	defaultConns              = 4
+	// defaultRetryBackoffBase is the first-retry backoff; each further retry
+	// doubles it up to retryBackoffMax. Injectable so tests can collapse the
+	// per-item wait without changing production pacing.
+	defaultRetryBackoffBase = 500 * time.Millisecond
 
 	minBlockSize = 4 << 20
 	maxBlockSize = 64 << 20
@@ -95,6 +99,14 @@ type Config struct {
 
 	CheckpointInterval, HeaderTimeout time.Duration
 
+	// RetryBackoffBase and UpstreamBlacklistTTL tune the per-item retry pacing
+	// and how long a failed upstream is parked for a file. Both default to the
+	// production values (defaultRetryBackoffBase / defaultUpstreamBlacklistTTL)
+	// when <= 0; tests shrink them so single-upstream retry paths do not burn
+	// real wall-clock waiting out the backoff and blacklist.
+	RetryBackoffBase     time.Duration
+	UpstreamBlacklistTTL time.Duration
+
 	Prov *otel.Providers
 }
 
@@ -138,6 +150,12 @@ func NewDownloader(cfg Config) *Downloader {
 	}
 	if cfg.HeaderTimeout <= 0 {
 		cfg.HeaderTimeout = defaultHeaderTimeout
+	}
+	if cfg.RetryBackoffBase <= 0 {
+		cfg.RetryBackoffBase = defaultRetryBackoffBase
+	}
+	if cfg.UpstreamBlacklistTTL <= 0 {
+		cfg.UpstreamBlacklistTTL = defaultUpstreamBlacklistTTL
 	}
 	if cfg.Prov == nil {
 		cfg.Prov = otel.Noop()
@@ -329,7 +347,7 @@ func (d *Downloader) Run(ctx context.Context, t *FileTask, sink *fcio.File, prog
 		if _, serr := rand.Read(seed[:]); serr != nil {
 			return fmt.Errorf("transfer: seed rng: %w", serr)
 		}
-		fd.hs = newHTTPSource(d.log, d.cfg.HTTP, &task, d.cfg.HeaderTimeout, seed)
+		fd.hs = newHTTPSource(d.log, d.cfg.HTTP, &task, d.cfg.HeaderTimeout, d.cfg.UpstreamBlacklistTTL, seed)
 		fd.src = fd.hs
 		fd.srcLabel = "http"
 	}
