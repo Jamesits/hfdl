@@ -1,7 +1,7 @@
 // Package tune implements the adaptive download-concurrency controller: a
-// hill-climbing state machine that grows the process-wide connection budget
-// from 1 while extra connections keep raising the measured global rate, and
-// holds otherwise.
+// hill-climbing state machine that seeds the process-wide connection budget at
+// half the configured ceiling and then grows it while extra connections keep
+// raising the measured global rate, holding (or reverting) otherwise.
 //
 // The controller is pure and clock-driven: the caller (sched's tune loop)
 // samples the world once per tick and feeds it to Observe, which returns the

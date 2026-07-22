@@ -22,8 +22,17 @@ func saturated(rate float64, budget int) Sample {
 	return Sample{Rate: rate, Assigned: budget}
 }
 
+// atBudget returns a controller pinned to budget b with the first-observe
+// half-max seed already consumed, so a test drives the ramp mechanism from a
+// chosen point instead of the production half-ceiling start.
+func atBudget(cfg Config, b int) *Controller {
+	c := New(cfg)
+	c.budget, c.seeded = b, true
+	return c
+}
+
 func TestRampAcceptsWhileRateRises(t *testing.T) {
-	c := New(testCfg())
+	c := atBudget(testCfg(), 1)
 	now := time.Unix(0, 0)
 
 	if got := c.Observe(now, 16, saturated(100, 1)); got != 2 {
@@ -51,7 +60,7 @@ func TestRampAcceptsWhileRateRises(t *testing.T) {
 // revert — admission keyed off it can never open a file slot a revert
 // cannot reclaim.
 func TestCommittedLagsProbe(t *testing.T) {
-	c := New(testCfg())
+	c := atBudget(testCfg(), 1)
 	now := time.Unix(0, 0)
 	if got := c.Committed(); got != 1 {
 		t.Fatalf("initial committed = %d, want 1", got)
@@ -88,7 +97,7 @@ func TestCommittedLagsProbe(t *testing.T) {
 }
 
 func TestFlatRateRevertsAndBacksOff(t *testing.T) {
-	c := New(testCfg())
+	c := atBudget(testCfg(), 1)
 	now := time.Unix(0, 0)
 
 	if got := c.Observe(now, 16, saturated(100, 1)); got != 2 {
@@ -124,7 +133,7 @@ func TestFlatRateRevertsAndBacksOff(t *testing.T) {
 }
 
 func TestUtilizationCeilingHoldsBudget(t *testing.T) {
-	c := New(testCfg())
+	c := atBudget(testCfg(), 1)
 	now := time.Unix(0, 0)
 	s := saturated(100, 1)
 	s.Utilization = 0.97
@@ -137,7 +146,7 @@ func TestUtilizationCeilingHoldsBudget(t *testing.T) {
 }
 
 func TestUnassignedBudgetHolds(t *testing.T) {
-	c := New(testCfg())
+	c := atBudget(testCfg(), 1)
 	now := time.Unix(0, 0)
 	// Budget 1 but nothing assigned (no active file): no probe.
 	if got := c.Observe(now, 16, Sample{Rate: 100, Assigned: 0}); got != 1 {
@@ -146,7 +155,7 @@ func TestUnassignedBudgetHolds(t *testing.T) {
 }
 
 func TestKillFreezeRevertsProbe(t *testing.T) {
-	c := New(testCfg())
+	c := atBudget(testCfg(), 1)
 	now := time.Unix(0, 0)
 	// Seed the kill counter with a nonzero base: pre-existing kills must not
 	// freeze a fresh controller.
@@ -171,8 +180,7 @@ func TestKillFreezeRevertsProbe(t *testing.T) {
 }
 
 func TestMaxBudgetClamps(t *testing.T) {
-	c := New(testCfg())
-	c.budget = 8
+	c := atBudget(testCfg(), 8)
 	now := time.Unix(0, 0)
 	if got := c.Observe(now, 4, saturated(100, 8)); got != 4 {
 		t.Fatalf("clamped budget = %d, want 4", got)
@@ -181,6 +189,36 @@ func TestMaxBudgetClamps(t *testing.T) {
 	now = now.Add(time.Minute)
 	if got := c.Observe(now, 4, saturated(100, 4)); got != 4 {
 		t.Fatalf("ceiling budget = %d, want 4", got)
+	}
+}
+
+// TestSeedsHalfMaxOnFirstObserve: a fresh controller jumps to half the
+// ceiling on its first sample instead of climbing from 1, so a fast link
+// reaches useful parallelism immediately; from there it probes by +25% (the
+// large-pool step), not by doubling.
+func TestSeedsHalfMaxOnFirstObserve(t *testing.T) {
+	c := New(testCfg())
+	now := time.Unix(0, 0)
+	// Ceiling 16: seed to 8. Not yet saturated at the seed, so it holds
+	// without probing.
+	if got := c.Observe(now, 16, Sample{Rate: 100, Assigned: 1}); got != 8 {
+		t.Fatalf("seeded budget = %d, want 8", got)
+	}
+	if got := c.Committed(); got != 8 {
+		t.Fatalf("seeded committed = %d, want 8", got)
+	}
+	// Saturated at the seed: the next probe grows by +25%, not by doubling.
+	if got := c.Observe(now, 16, saturated(100, 8)); got != 10 {
+		t.Fatalf("probe from seed = %d, want 10 (+25%%)", got)
+	}
+}
+
+// TestSeedFloorsAtOne: a ceiling of 1 seeds to 1, not 0 — a live run always
+// keeps at least one connection.
+func TestSeedFloorsAtOne(t *testing.T) {
+	c := New(testCfg())
+	if got := c.Observe(time.Unix(0, 0), 1, saturated(100, 1)); got != 1 {
+		t.Fatalf("seeded budget at ceiling 1 = %d, want 1", got)
 	}
 }
 

@@ -2,11 +2,14 @@ package tune
 
 import "time"
 
-// Defaults for Config's zero values. The settle window must exceed the
-// caller's rate-measurement window (stats uses a 10s ring) so the compared
-// rate fully reflects the probed budget, never a blend of before and after.
+// Defaults for Config's zero values. The settle window must comfortably
+// exceed the caller's rate-measurement window (stats uses a 10s ring) so the
+// compared rate is a fully-settled 10s sample, never a blend of before and
+// after nor the transient of connections still in TCP slow-start. It is held
+// well above the ring — not merely past it — so probe accept/revert decisions
+// ride on steady state rather than measurement noise.
 const (
-	DefaultSettle        = 12 * time.Second
+	DefaultSettle        = 24 * time.Second
 	DefaultProbeInterval = 5 * time.Second
 	DefaultBackoffStart  = 30 * time.Second
 	DefaultBackoffMax    = 5 * time.Minute
@@ -20,9 +23,9 @@ const (
 	// configured ceiling — not connection count — is the active constraint,
 	// so probing is pointless.
 	defaultUtilCeiling = 0.9
-	// doubleBelow is the budget under which growth doubles (fast start from
-	// 1); at or above it growth is +25% so a large pool converges without
-	// overshooting the sweet spot by 2x.
+	// doubleBelow is the budget under which growth doubles (fast ramp for a
+	// small ceiling, whose half-max seed lands here); at or above it growth is
+	// +25% so a large pool converges without overshooting the sweet spot by 2x.
 	doubleBelow = 8
 	// saturationNum/Den: probing requires at least 3/4 of the budget to be
 	// assigned to live files, otherwise the budget is not the constraint and
@@ -83,6 +86,7 @@ type Controller struct {
 	budget     int
 	prevBudget int // pre-probe budget to revert to
 	probing    bool
+	seeded     bool // half-max start applied on the first Observe
 
 	baseRate    float64   // rate baseline recorded when the probe started
 	settleUntil time.Time // probe evaluation time
@@ -94,7 +98,9 @@ type Controller struct {
 	killsSeeded bool
 }
 
-// New builds a controller starting at budget 1.
+// New builds a controller. Its budget seeds to half the ceiling on the first
+// Observe — the ceiling is unknown until then — and reports 1 until that
+// first sample arrives.
 func New(cfg Config) *Controller {
 	return &Controller{cfg: cfg.withDefaults(), budget: 1}
 }
@@ -120,6 +126,15 @@ func (c *Controller) Committed() int {
 func (c *Controller) Observe(now time.Time, maxBudget int, s Sample) int {
 	if maxBudget < 1 {
 		maxBudget = 1
+	}
+	// Seed at half the ceiling on the first sample rather than climbing from
+	// 1: a fresh link almost always wants many connections, so start in the
+	// middle and let the hill-climb refine up or down from there instead of
+	// spending dozens of probe/settle cycles ramping. The ceiling is only
+	// known here, at the first Observe, not at New.
+	if !c.seeded {
+		c.seeded = true
+		c.budget = max(1, maxBudget/2)
 	}
 	if c.budget > maxBudget {
 		// Operator lowered the ceiling mid-flight: clamp, and abandon any
