@@ -105,7 +105,7 @@ func newDownloadCmd() *cobra.Command {
 	fl.StringVar(&f.policyStr, "hfdl-upstream-policy", config.BestSpeed.String(), "per-block upstream selection: best-speed|random|round-robin")
 	fl.StringArrayVar(&f.references, "hfdl-reference", nil, "local file/dir to salvage whole-file matches from (repeatable)")
 	fl.StringVar(&f.bandwidthStr, "hfdl-max-bandwidth", "", "global download bandwidth cap (e.g. 500MiB/s; default unlimited)")
-	fl.Int64Var(&f.apiIOPS, "hfdl-api-iops", dfl.APIIOPS, "HF API requests per second (burst 10)")
+	fl.Int64Var(&f.apiIOPS, "hfdl-api-iops", dfl.APIIOPS, "HF API requests per second")
 	fl.IntVar(&f.diskActive, "hfdl-disk-active", dfl.DiskActivePct, "disk duty-cycle ceiling 1-100 (percent)")
 	fl.IntVar(&f.diskWorkers, "hfdl-disk-workers", dfl.DiskWorkers, "disk-queue workers for hashing/salvage/copy (0 = auto)")
 	fl.DurationVar(&f.stallTimeout, "hfdl-stall-timeout", dfl.StallTimeout, "idle-read stall window")

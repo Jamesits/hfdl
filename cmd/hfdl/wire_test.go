@@ -275,8 +275,8 @@ func TestAdaptMetricsMapsEveryField(t *testing.T) {
 		DutyMedia:       "hdd",
 		Cooldowns:       []sched.CooldownInfo{{Target: "ep", Kind: "cas", Remaining: 1500 * time.Millisecond}},
 	}
-	bandwidth := throttle.NewBucket(0, 0)
-	api := throttle.NewBucket(5, 10)
+	bandwidth := throttle.NewBucket(0, 0, 0)
+	api := throttle.NewBucket(5, 10, 0)
 	duty := throttle.NewDutyLimiter(80, throttle.MediaHDD)
 	reg := stats.New()
 	reg.AddUpstream("https://huggingface.co", 1234)

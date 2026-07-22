@@ -301,7 +301,7 @@ func testDownloader(t *testing.T) *Downloader {
 	return NewDownloader(Config{
 		Log:                  slog.New(slog.DiscardHandler),
 		HTTP:                 &http.Client{},
-		Bandwidth:            throttle.NewBucket(0, 0),
+		Bandwidth:            throttle.NewBucket(0, 0, 0),
 		Stats:                stats.New(),
 		Pool:                 fcio.NewPool(64<<10, 4<<20),
 		CheckpointInterval:   time.Hour,

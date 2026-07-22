@@ -38,8 +38,8 @@ func offlineManagerAt(t *testing.T, hub *fixtureHub, dir, cacheRoot string) *Man
 	if err != nil {
 		t.Fatalf("cache.OpenStore: %v", err)
 	}
-	bw := throttle.NewBucket(0, 0)
-	api := throttle.NewBucket(1000, 1000)
+	bw := throttle.NewBucket(0, 0, 0)
+	api := throttle.NewBucket(1000, 1000, 1000)
 	duty := throttle.NewDutyLimiter(100, throttle.MediaSSD)
 	reg := stats.New()
 	dl := transfer.NewDownloader(transfer.Config{

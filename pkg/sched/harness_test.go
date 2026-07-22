@@ -441,8 +441,8 @@ func newTestEnvLog(t *testing.T, hub *fixtureHub, log *slog.Logger, opts ...envO
 		t.Fatalf("cache.OpenStore: %v", err)
 	}
 
-	bw := throttle.NewBucket(0, 0) // unlimited
-	api := throttle.NewBucket(1000, 1000)
+	bw := throttle.NewBucket(0, 0, 0) // unlimited
+	api := throttle.NewBucket(1000, 1000, 1000)
 	duty := throttle.NewDutyLimiter(100, throttle.MediaSSD)
 	reg := stats.New()
 	dl := transfer.NewDownloader(transfer.Config{

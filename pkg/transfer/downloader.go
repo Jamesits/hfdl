@@ -137,7 +137,7 @@ func NewDownloader(cfg Config) *Downloader {
 		cfg.HTTP = &http.Client{}
 	}
 	if cfg.Bandwidth == nil {
-		cfg.Bandwidth = throttle.NewBucket(0, 0) // unlimited
+		cfg.Bandwidth = throttle.NewBucket(0, 0, 0) // unlimited
 	}
 	if cfg.Stats == nil {
 		cfg.Stats = stats.New()

@@ -22,7 +22,7 @@ func waitFor(t *testing.T, d time.Duration, cond func() bool, msg string) {
 }
 
 func TestBucketUnlimitedNeverBlocks(t *testing.T) {
-	b := NewBucket(0, 0)
+	b := NewBucket(0, 0, 0)
 	start := time.Now()
 	const total = int64(1 << 20)
 	for range 1000 {
@@ -50,7 +50,7 @@ func TestBucketUnlimitedNeverBlocks(t *testing.T) {
 func TestBucketRateLimitedThroughput(t *testing.T) {
 	// 1000 tokens/s, burst 100 (starts full): consuming 500 tokens waits
 	// for 400 of them -> ~400ms.
-	b := NewBucket(1000, 100)
+	b := NewBucket(1000, 100, 100)
 	start := time.Now()
 	for range 10 {
 		if err := b.Wait(t.Context(), 50); err != nil {
@@ -67,7 +67,7 @@ func TestBucketRateLimitedThroughput(t *testing.T) {
 }
 
 func TestBucketBurstHonored(t *testing.T) {
-	b := NewBucket(100, 50)
+	b := NewBucket(100, 50, 50)
 	start := time.Now()
 	if err := b.Wait(t.Context(), 50); err != nil {
 		t.Fatal(err)
@@ -84,8 +84,21 @@ func TestBucketBurstHonored(t *testing.T) {
 	}
 }
 
+func TestBucketStartEmptyPaces(t *testing.T) {
+	// start=0: the bucket is empty at construction, so even the first request
+	// is paced — no cold-start burst. At 10/s, one token accrues in ~100ms.
+	b := NewBucket(10, 50, 0)
+	start := time.Now()
+	if err := b.Wait(t.Context(), 1); err != nil {
+		t.Fatal(err)
+	}
+	if el := time.Since(start); el < 50*time.Millisecond {
+		t.Fatalf("empty-start bucket did not pace the first request: %v (want ~100ms)", el)
+	}
+}
+
 func TestBucketWaitersAndWaitTotal(t *testing.T) {
-	b := NewBucket(10, 1)
+	b := NewBucket(10, 1, 1)
 	if err := b.Wait(t.Context(), 1); err != nil { // drain the initial burst
 		t.Fatal(err)
 	}
@@ -107,7 +120,7 @@ func TestBucketWaitersAndWaitTotal(t *testing.T) {
 }
 
 func TestBucketSetRateHot(t *testing.T) {
-	b := NewBucket(100, 100)
+	b := NewBucket(100, 100, 100)
 	if err := b.Wait(t.Context(), 100); err != nil { // drain burst
 		t.Fatal(err)
 	}
@@ -132,7 +145,7 @@ func TestBucketSetRateHot(t *testing.T) {
 }
 
 func TestBucketSetRateToUnlimitedWakesWaiter(t *testing.T) {
-	b := NewBucket(10, 1)
+	b := NewBucket(10, 1, 1)
 	if err := b.Wait(t.Context(), 1); err != nil {
 		t.Fatal(err)
 	}
@@ -153,7 +166,7 @@ func TestBucketSetRateToUnlimitedWakesWaiter(t *testing.T) {
 }
 
 func TestBucketWaitCancel(t *testing.T) {
-	b := NewBucket(10, 1)
+	b := NewBucket(10, 1, 1)
 	if err := b.Wait(t.Context(), 1); err != nil {
 		t.Fatal(err)
 	}
@@ -179,7 +192,7 @@ func TestBucketWaitCancel(t *testing.T) {
 func TestBucketWaitNExceedsBurst(t *testing.T) {
 	// n > burst must be served in installments, not deadlock: 100 instant
 	// (burst), then 100 + 50 at 1000/s -> ~150ms.
-	b := NewBucket(1000, 100)
+	b := NewBucket(1000, 100, 100)
 	start := time.Now()
 	if err := b.Wait(t.Context(), 250); err != nil {
 		t.Fatal(err)
@@ -197,7 +210,7 @@ func TestBucketWaitCancelRecordsConsumed(t *testing.T) {
 	// n > burst: the first installment (burst=100) is consumed immediately,
 	// then the wait for the remainder is cancelled. The consumed installment
 	// must still be recorded in the windowed ring (not silently leaked).
-	b := NewBucket(10, 100) // burst 100 starts full; 10/s so the 2nd installment stalls
+	b := NewBucket(10, 100, 100) // burst 100 starts full; 10/s so the 2nd installment stalls
 	ctx, cancel := context.WithCancel(t.Context())
 	done := make(chan error, 1)
 	go func() { done <- b.Wait(ctx, 150) }() // 100 now, 50 more at 10/s -> ~5s
@@ -212,10 +225,13 @@ func TestBucketWaitCancelRecordsConsumed(t *testing.T) {
 }
 
 func TestBucketSetRateClampsNegativeTokens(t *testing.T) {
-	// A bucket built unlimited with burst < 1 holds a negative token balance.
-	// SetRate to a limited rate must clamp tokens into [0, burst] so the next
-	// Wait is not spuriously blocked.
-	b := NewBucket(0, -5) // unlimited; tokens = -5
+	// A bucket can hold a negative token balance (e.g. an unlimited bucket
+	// whose balance was driven negative). SetRate to a limited rate must clamp
+	// tokens into [0, burst] so the next Wait is not spuriously blocked.
+	b := NewBucket(0, 0, 0) // unlimited
+	b.mu.Lock()
+	b.tokens = -5
+	b.mu.Unlock()
 	b.SetRate(1000, 100)
 	b.mu.Lock()
 	tok := b.tokens
@@ -230,7 +246,7 @@ func TestBucketSetRateClampsNegativeTokens(t *testing.T) {
 
 func TestBucketWindowedRateFakeClock(t *testing.T) {
 	fc := newFakeClock()
-	b := NewBucket(0, 0) // unlimited: Wait consumes without pacing
+	b := NewBucket(0, 0, 0) // unlimited: Wait consumes without pacing
 	b.clock = fc
 	for i := range 10 {
 		if err := b.Wait(t.Context(), 100); err != nil {
@@ -255,7 +271,7 @@ func TestBucketWindowedRateFakeClock(t *testing.T) {
 }
 
 func TestBucketConcurrent(t *testing.T) {
-	b := NewBucket(100_000, 1000)
+	b := NewBucket(100_000, 1000, 1000)
 	ctx, cancel := context.WithTimeout(t.Context(), 300*time.Millisecond)
 	defer cancel()
 	var consumed atomic.Int64

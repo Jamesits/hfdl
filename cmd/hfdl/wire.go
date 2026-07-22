@@ -211,8 +211,12 @@ func wireDownloadWith(ctx context.Context, p *downloadPlan, getenv func(string) 
 		app.close(ctx)
 		return nil, err
 	}
-	bandwidth := throttle.NewBucket(p.limits.MaxBandwidthBps, config.BandwidthBurst(p.limits.MaxBandwidthBps))
-	api := throttle.NewBucket(p.limits.APIIOPS, p.limits.APIBurst)
+	bwBurst := config.BandwidthBurst(p.limits.MaxBandwidthBps)
+	// Bandwidth starts full so the first chunk transfers without an artificial
+	// stall. The API bucket starts empty: a cold start must not fire a burst of
+	// Hub requests before the rate limit engages — pace from the first call.
+	bandwidth := throttle.NewBucket(p.limits.MaxBandwidthBps, bwBurst, bwBurst)
+	api := throttle.NewBucket(p.limits.APIIOPS, p.limits.APIBurst, 1)
 	duty := throttle.NewDutyLimiter(p.limits.DiskActivePct, throttle.MediaUnknown)
 	// Probe the cache filesystem once: the duty derate depends on media class.
 	if fsType, err := fcio.ProbeFs(ctx, p.cacheDir); err != nil {

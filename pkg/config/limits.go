@@ -83,18 +83,18 @@ func ParseUpstreamPolicy(s string) (UpstreamPolicy, error) {
 // the corresponding activity; CLI flag validation keeps user-facing values
 // in range instead.
 type Limits struct {
-	MaxBandwidthBps    int64         // global download token bucket; 0 = unlimited (∞ default)
-	APIIOPS            int64         // HF API requests/sec, default 5
-	APIBurst           int64         // API bucket burst, default 10
-	DiskActivePct      int           // disk duty-cycle ceiling 1–100, default 100 (unlimited)
+	MaxBandwidthBps    int64         // global download token bucket; 0 = unlimited
+	APIIOPS            int64         // HF API requests/sec
+	APIBurst           int64         // API bucket burst
+	DiskActivePct      int           // disk duty-cycle ceiling 1–100 (percentage)
 	DiskWorkers        int           // disk-queue worker count; 0 = auto by media (SSD 2, else 1). Runtime-capped to GOMAXPROCS-1 to avoid CPU starvation (see sched.diskWorkerCount)
-	Conns              int           // per-file block connections, default 8
-	MaxWorkers         int           // files in downloading at once, default 8 (upstream parity flag)
+	Conns              int           // per-file block connections
+	MaxWorkers         int           // files in downloading at once (upstream parity flag)
 	BlockSize          int64         // 0 = adaptive: clamp(pow2(size/conns), 4MiB, 64MiB)
-	StallTimeout       time.Duration // idle-read / soft floor window, default 15s
-	StallMinBytes      int64         // soft throughput floor per window, default 32KiB
+	StallTimeout       time.Duration // idle-read / soft floor window
+	StallMinBytes      int64         // soft throughput floor per window
 	IOBuffer           int64         // fcio pool cap bytes; 0 = auto clamp(slab×conns×2, 64MiB, 1GiB)
-	CheckpointInterval time.Duration // durable progress cadence, default 30s
+	CheckpointInterval time.Duration // durable progress cadence
 	IOMode             IOMode
 	UpstreamPolicy     UpstreamPolicy
 }
@@ -125,7 +125,7 @@ func DefaultLimits() Limits {
 	return Limits{
 		MaxBandwidthBps:    0,
 		APIIOPS:            5,
-		APIBurst:           10,
+		APIBurst:           1,
 		DiskActivePct:      100,
 		DiskWorkers:        0, // auto: sched picks by media class
 		Conns:              8,

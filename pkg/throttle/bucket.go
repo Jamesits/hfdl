@@ -21,7 +21,8 @@ type BucketStats struct {
 // hand-rolled (rather than golang.org/x/time/rate) because the stats
 // contract requires tracking live waiters and cumulative wait time.
 //
-// The bucket starts full. A rate of 0 means unlimited: Wait never blocks
+// The initial token balance is the start argument to NewBucket (a negative
+// start is treated as 0). A rate of 0 means unlimited: Wait never blocks
 // (but still records consumption for WindowedRate) and Utilization is 0.
 // A Wait for n > Burst is served in Burst-sized installments instead of
 // failing, so a bandwidth bucket with burst below the caller's chunk size
@@ -44,14 +45,23 @@ type Bucket struct {
 }
 
 // NewBucket returns a Bucket limited to perSec tokens per second with the
-// given burst capacity. perSec <= 0 means unlimited. A limited bucket with
-// burst < 1 is normalized to burst 1 so any Wait can terminate.
-func NewBucket(perSec, burst int64) *Bucket {
+// given burst capacity, pre-filled with start tokens. perSec <= 0 means
+// unlimited. A limited bucket with burst < 1 is normalized to burst 1 so any
+// Wait can terminate. start pre-fills the bucket (a negative start is treated
+// as 0): pass burst for a bucket that may fire a full burst immediately, or 0
+// for one that paces from the first request (no cold-start burst).
+func NewBucket(perSec, burst, start int64) *Bucket {
 	if perSec < 0 {
 		perSec = 0
 	}
 	if perSec > 0 && burst < 1 {
 		burst = 1
+	}
+	// A negative initial token count is nonsensical and would spuriously block
+	// the first Wait; floor it at 0. No upper clamp: a start above burst is
+	// trimmed to burst by refillLocked on the first Wait.
+	if start < 0 {
+		start = 0
 	}
 	b := &Bucket{
 		clock: realClock{},
@@ -60,7 +70,7 @@ func NewBucket(perSec, burst int64) *Bucket {
 	}
 	b.rate.Store(perSec)
 	b.burst.Store(burst)
-	b.tokens = float64(burst)
+	b.tokens = float64(start)
 	b.last = b.clock.Now()
 	return b
 }
@@ -125,6 +135,9 @@ func (b *Bucket) Wait(ctx context.Context, n int64) error {
 			blockedFrom = now
 			b.waiters.Add(1)
 		}
+
+		// Go 1.23 automatically manages OS timer resolution on Windows for us.
+		// https://go-review.googlesource.com/c/website/+/614435
 		t := time.NewTimer(waitDur)
 		select {
 		case <-ctx.Done():
