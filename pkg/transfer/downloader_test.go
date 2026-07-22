@@ -36,15 +36,19 @@ func TestDownloadBasic(t *testing.T) {
 	if got := readSink(t, sink); string(got) != string(content) {
 		t.Fatal("content mismatch")
 	}
+	// The collector drains the event channel asynchronously. The final forced
+	// checkpoint is emitted just before Run returns, after wg.Wait() (which
+	// happens-after every worker's last block-done emit), so it is the last
+	// event on the channel: once it is collected, channel FIFO guarantees all
+	// block start/done events are collected too. Poll for it before asserting
+	// the counts, rather than sampling once (same race as TestSetParallelismLive).
+	waitFor(t, "checkpoint event", 5*time.Second, func() bool { return evs.count(EventCheckpoint) > 0 })
 	blocks := int((size + 128<<10 - 1) / (128 << 10))
 	if n := evs.count(EventBlockDone); n != blocks {
 		t.Fatalf("block-done events %d, want %d", n, blocks)
 	}
 	if n := evs.count(EventBlockStart); n != blocks {
 		t.Fatalf("block-start events %d, want %d", n, blocks)
-	}
-	if evs.count(EventCheckpoint) == 0 {
-		t.Fatal("no checkpoint event")
 	}
 	final := prog.last(t)
 	if len(final.Missing(size)) != 0 {
