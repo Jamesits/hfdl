@@ -1,0 +1,52 @@
+#!/usr/bin/env bash
+set -Eeuo pipefail
+
+bin_dir="$HOME/.local/bin"
+
+case "$(uname -m)" in
+  x86_64 | amd64) ;;
+  *)
+    printf 'Unsupported orb architecture: %s\n' "$(uname -m)" >&2
+    exit 1
+    ;;
+esac
+
+printf 'Checking the latest stable Go release...\n'
+go_releases="$(curl --fail --silent --show-error --location --retry 3 'https://go.dev/dl/?mode=json')"
+go_version="$(jq -r '.[0].version | ltrimstr("go")' <<<"$go_releases")"
+go_archive="go${go_version}.linux-amd64.tar.gz"
+go_sha256="$(jq -r --arg archive "$go_archive" '.[0].files[] | select(.filename == $archive) | .sha256' <<<"$go_releases")"
+go_root="$HOME/.local/share/go/$go_version"
+
+if [[ -z "$go_version" || -z "$go_sha256" || "$go_sha256" == "null" ]]; then
+  printf 'Could not determine the latest stable Go release.\n' >&2
+  exit 1
+fi
+
+mkdir -p "$bin_dir" "$(dirname "$go_root")"
+
+if [[ ! -x "$go_root/bin/go" ]] || [[ "$($go_root/bin/go version)" != "go version go${go_version} linux/amd64" ]]; then
+  printf 'Installing Go %s...\n' "$go_version"
+  tmp_dir="$(mktemp -d)"
+  trap 'rm -rf "$tmp_dir"' EXIT
+  curl --fail --location --retry 3 --output "$tmp_dir/$go_archive" "https://go.dev/dl/$go_archive"
+  printf '%s  %s\n' "$go_sha256" "$tmp_dir/$go_archive" | sha256sum --check
+  rm -rf "$go_root"
+  mkdir -p "$go_root"
+  tar -xzf "$tmp_dir/$go_archive" --strip-components=1 -C "$go_root"
+fi
+
+ln -sfn "$go_root/bin/go" "$bin_dir/go"
+ln -sfn "$go_root/bin/gofmt" "$bin_dir/gofmt"
+export PATH="$bin_dir:$PATH"
+export GOBIN="$bin_dir"
+
+printf 'Installing or updating Go development tools...\n'
+go install github.com/goreleaser/goreleaser/v2@latest
+go install github.com/golangci/golangci-lint/v2/cmd/golangci-lint@latest
+go install golang.org/x/tools/gopls@latest
+
+repo_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+printf 'Downloading Go module dependencies...\n'
+go -C "$repo_root" mod download
+printf 'Orb setup complete.\n'
