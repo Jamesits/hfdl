@@ -8,7 +8,10 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"sync"
 )
+
+var unsupportedHintsLog sync.Once
 
 // Plain buffered fallback for genuinely-unknown platforms (Windows and macOS
 // have real tiers in file_windows.go / file_darwin.go): every file resolves to
@@ -21,6 +24,9 @@ import (
 func (e *Engine) Open(ctx context.Context, path string, size int64, h Hints) (*File, error) {
 	if err := ctx.Err(); err != nil {
 		return nil, err
+	}
+	if h.Sequential {
+		unsupportedHintsLog.Do(func() { e.logDebug("access-pattern hints unsupported on this platform") })
 	}
 	bf, err := os.OpenFile(path, os.O_RDWR|os.O_CREATE, 0o666)
 	if err != nil {

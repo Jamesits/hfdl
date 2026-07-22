@@ -1,6 +1,12 @@
 package otel
 
 import (
+	"go/ast"
+	"go/parser"
+	"go/token"
+	"io/fs"
+	"path/filepath"
+	"runtime"
 	"strings"
 	"sync/atomic"
 	"testing"
@@ -240,6 +246,62 @@ func TestCardinalityLint(t *testing.T) {
 	} {
 		if !seen[name] {
 			t.Errorf("gauge %q observed but missing from instrumentSpecs", name)
+		}
+	}
+
+	_, file, _, _ := runtime.Caller(0)
+	root := filepath.Clean(filepath.Join(filepath.Dir(file), "..", ".."))
+	fset := token.NewFileSet()
+	for _, tree := range []string{"pkg", "cmd"} {
+		err := filepath.WalkDir(filepath.Join(root, tree), func(path string, entry fs.DirEntry, walkErr error) error {
+			if walkErr != nil || entry.IsDir() || !strings.HasSuffix(entry.Name(), ".go") {
+				return walkErr
+			}
+			fileAST, err := parser.ParseFile(fset, path, nil, 0)
+			if err != nil {
+				return err
+			}
+			ast.Inspect(fileAST, func(node ast.Node) bool {
+				call, ok := node.(*ast.CallExpr)
+				if !ok {
+					return true
+				}
+				sel, ok := call.Fun.(*ast.SelectorExpr)
+				if !ok {
+					return true
+				}
+				pkg, qualified := sel.X.(*ast.Ident)
+				if sel.Sel.Name != "WithAttributes" || !qualified || pkg.Name != "metric" {
+					return true
+				}
+				ast.Inspect(call, func(n ast.Node) bool {
+					attrCall, ok := n.(*ast.CallExpr)
+					if !ok {
+						return true
+					}
+					attrSel, ok := attrCall.Fun.(*ast.SelectorExpr)
+					if !ok {
+						return true
+					}
+					id, isAttribute := attrSel.X.(*ast.Ident)
+					if !isAttribute || id.Name != "attribute" || len(attrCall.Args) == 0 {
+						return true
+					}
+					lit, literal := attrCall.Args[0].(*ast.BasicLit)
+					if literal {
+						key := strings.Trim(lit.Value, "\"")
+						if !allowed[key] {
+							t.Errorf("%s: metric attribute %q is not allowlisted", path, key)
+						}
+					}
+					return true
+				})
+				return false
+			})
+			return nil
+		})
+		if err != nil {
+			t.Fatalf("scan %s: %v", tree, err)
 		}
 	}
 }

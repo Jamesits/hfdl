@@ -240,36 +240,3 @@ func (m *stallMonitor) killLocked(c *connTrack, r stallReason) {
 	c.reason = r
 	c.cancel()
 }
-
-// armedState exposes (armed, anyAboveFloor) for tests.
-func (m *stallMonitor) armedState() (bool, bool) {
-	m.mu.Lock()
-	defer m.mu.Unlock()
-	return m.armed, m.anyAboveFloorLocked()
-}
-
-// driveConn is the test seam: register a connection without a ticker or
-// cancel side effects, for deterministic clock-driven evaluation.
-func (m *stallMonitor) driveConn(start time.Time) *connTrack {
-	c := &connTrack{
-		mon:         m,
-		start:       start,
-		windowStart: start,
-		lastFloor:   start,
-		cancel:      func() {},
-		stop:        make(chan struct{}),
-		done:        make(chan struct{}),
-	}
-	close(c.done) // no watcher runs for driven conns
-	m.mu.Lock()
-	m.conns[c] = struct{}{}
-	m.mu.Unlock()
-	return c
-}
-
-// driveSweep is the test seam: run one synchronized sweep at an injected clock
-// time, evaluating every registered conn whose window elapsed — the same code
-// path production uses, so hysteresis consistency is exercised deterministically.
-func (m *stallMonitor) driveSweep(now time.Time) {
-	m.sweep(now)
-}

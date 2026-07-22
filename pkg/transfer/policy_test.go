@@ -150,6 +150,37 @@ func TestPolicyNoHealthy(t *testing.T) {
 	assertKind(t, err, FailNoHealthy)
 }
 
+func TestPenalizeBlacklistsUntilTTLExpiry(t *testing.T) {
+	task := policyTask("http://bad", "http://good")
+	task.Policy = config.RoundRobin
+	src := newTestHTTPSource(task, testSeed(18))
+	src.blacklistTTL = 20 * time.Millisecond
+	d := testDownloader(t)
+	fd := &fileDownload{d: d, hs: src}
+
+	fd.penalize("http://bad")
+	until, ok := src.cooldown["http://bad"]
+	if !ok || !until.After(time.Now()) {
+		t.Fatal("penalize did not install a temporary blacklist")
+	}
+	for i := 0; i < 4; i++ {
+		got, err := src.pick(time.Now())
+		if err != nil {
+			t.Fatalf("pick while blacklisted: %v", err)
+		}
+		if got.Endpoint != "http://good" {
+			t.Fatalf("picked blacklisted endpoint %q", got.Endpoint)
+		}
+	}
+	got, err := src.pick(until.Add(time.Nanosecond))
+	if err != nil {
+		t.Fatalf("pick after TTL: %v", err)
+	}
+	if got.Endpoint != "http://bad" {
+		t.Fatalf("endpoint did not return after TTL: got %q", got.Endpoint)
+	}
+}
+
 func assertKind(t *testing.T, err error, kind FailKind) {
 	t.Helper()
 	ae, ok := err.(*AttemptError)

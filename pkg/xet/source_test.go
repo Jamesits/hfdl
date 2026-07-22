@@ -372,7 +372,7 @@ func TestBoundariesSnapping(t *testing.T) {
 	mk := func(start, end int64) reconTerm {
 		return reconTerm{xorb: "x", unpackedLength: end - start, fileStart: start, fileEnd: end, chunkEnd: 1}
 	}
-	s := &Source{}
+	s := &Source{size: 600}
 	s.recon = &reconstruction{terms: []reconTerm{mk(0, 100), mk(100, 250), mk(250, 600)}}
 
 	out := s.Boundaries(nil, 128)
@@ -417,8 +417,7 @@ func TestBoundariesSnapping(t *testing.T) {
 
 	// Partial missing interval mid-term snaps BOTH edges to term boundaries:
 	// the leading edge of [50,300) drops down to the enclosing term's start
-	// (term [0,100) → 0); the trailing edge stays at 300 (m.End) with interior
-	// splits landing on the term edges.
+	// (term [0,100) → 0); the trailing edge snaps up from 300 to 600.
 	out = s.Boundaries(intervals(50, 300), 128)
 	for _, iv := range out {
 		for _, e := range []int64{100, 250} {
@@ -427,8 +426,13 @@ func TestBoundariesSnapping(t *testing.T) {
 			}
 		}
 	}
-	if out[0].Start != 0 || out[len(out)-1].End != 300 {
+	if out[0].Start != 0 || out[len(out)-1].End != 600 {
 		t.Fatalf("coverage broken: %v", out)
+	}
+
+	out = s.Boundaries(intervals(110, 200), 128)
+	if out[0].Start != 100 || out[len(out)-1].End != 250 {
+		t.Fatalf("mid-term trailing edge was not snapped: %v", out)
 	}
 }
 

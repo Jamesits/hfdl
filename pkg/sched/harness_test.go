@@ -13,6 +13,7 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strconv"
 	"strings"
 	"sync"
@@ -74,6 +75,13 @@ type fixtureHub struct {
 	resolveWrong map[string]int // per path: serve wrongBytes for the next N resolve requests
 	delay        time.Duration  // per-request resolve delay (resume/parallelism tests)
 	hangLeft     map[string]int // per path: next N resolve GETs block until request ctx cancel
+
+	// hold gate: the next holdLeft resolve requests signal holdStart and then
+	// park (occupying their concurrency slot) until holdGate closes — the
+	// deterministic "catch the download mid-flight" primitive.
+	holdLeft  int
+	holdStart chan struct{}
+	holdGate  chan struct{}
 }
 
 func newFixtureHub(t *testing.T, files map[string][]byte, lfsPaths ...string) *fixtureHub {
@@ -181,6 +189,31 @@ func (h *fixtureHub) maxConcurrentSamePath() int {
 	return h.maxSame
 }
 
+// holdNextResolve arms the hold gate: the next n resolve requests each send
+// on the returned channel (buffered, never blocks the handler) and then park
+// until release is called or the request is aborted. A parked request keeps
+// its active/maxSame slot, so later requests deterministically overlap it.
+func (h *fixtureHub) holdNextResolve(n int) (started <-chan struct{}, release func()) {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	h.holdLeft = n
+	h.holdStart = make(chan struct{}, n)
+	h.holdGate = make(chan struct{})
+	gate := h.holdGate
+	var once sync.Once
+	return h.holdStart, func() { once.Do(func() { close(gate) }) }
+}
+
+// idle reports whether no resolve handler is in flight. Payload accounting
+// (payloadBytes) happens inside the handler, so a test must wait for idle
+// before sampling byte counters across a run boundary: a handler whose
+// client was cancelled can otherwise count its range after the sample.
+func (h *fixtureHub) idle() bool {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	return len(h.active) == 0
+}
+
 func (h *fixtureHub) repo404(w http.ResponseWriter, r *http.Request) bool {
 	p := strings.TrimPrefix(r.URL.Path, "/")
 	p = strings.TrimPrefix(p, "api/models/")
@@ -270,6 +303,12 @@ func (h *fixtureHub) handleResolve(w http.ResponseWriter, r *http.Request) {
 	if hang > 0 {
 		h.hangLeft[path]--
 	}
+	hold := false
+	if h.holdLeft > 0 {
+		h.holdLeft--
+		hold = true
+	}
+	holdStart, holdGate := h.holdStart, h.holdGate
 	h.resolveN[path]++
 	h.hits["resolve"]++
 	content := []byte(nil)
@@ -330,6 +369,14 @@ func (h *fixtureHub) handleResolve(w http.ResponseWriter, r *http.Request) {
 		}
 		h.mu.Unlock()
 	}()
+	if hold {
+		holdStart <- struct{}{} // buffered by holdNextResolve: never blocks
+		select {
+		case <-holdGate:
+		case <-r.Context().Done():
+			return
+		}
+	}
 	if delay > 0 {
 		select {
 		case <-time.After(delay):
@@ -568,7 +615,11 @@ func waitFor(t *testing.T, what string, cond func() bool) {
 		}
 		time.Sleep(10 * time.Millisecond)
 	}
-	t.Fatalf("timed out waiting for %s", what)
+	// Dump all goroutine stacks so a stuck pipeline stage is identifiable
+	// from the failure log alone.
+	buf := make([]byte, 1<<20)
+	buf = buf[:runtime.Stack(buf, true)]
+	t.Fatalf("timed out waiting for %s\n%s", what, buf)
 }
 
 func (e *testEnv) fileStatus(t *testing.T, path string) string {

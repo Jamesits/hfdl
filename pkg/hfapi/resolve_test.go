@@ -40,6 +40,7 @@ func TestResolveXetRefreshRoutePrecedence(t *testing.T) {
 		w.Header().Set("X-Xet-Hash", "xethash1")
 		w.Header().Set("Link", `<https://cas-auth.example/route-a>; rel="xet-auth"`)
 		w.Header().Set("X-Xet-Refresh-Route", "/route-b")
+		w.Header().Set("Location", "/follow-target")
 		w.WriteHeader(http.StatusFound) // hub-style 302; must NOT be followed
 	})
 	mux.HandleFunc("/o/r/resolve/main/header-only.bin", func(w http.ResponseWriter, r *http.Request) {

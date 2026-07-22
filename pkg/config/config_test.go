@@ -49,7 +49,7 @@ func TestCacheDirPrecedence(t *testing.T) {
 }
 
 func TestEndpointsResolution(t *testing.T) {
-	if got := Endpoints([]string{"https://a", "https://b"}, envFrom(map[string]string{"HF_ENDPOINT": "https://env"})); len(got) != 2 || got[0] != "https://a" {
+	if got := Endpoints([]string{"https://a/", "https://b///"}, envFrom(map[string]string{"HF_ENDPOINT": "https://env"})); len(got) != 2 || got[0] != "https://a" || got[1] != "https://b" {
 		t.Fatalf("flag endpoints: %v", got)
 	}
 	if got := Endpoints(nil, envFrom(map[string]string{"HF_ENDPOINT": "https://env/"})); len(got) != 1 || got[0] != "https://env" {

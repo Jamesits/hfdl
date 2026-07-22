@@ -261,6 +261,7 @@ type fileDownload struct {
 	wg        sync.WaitGroup
 	workersMu sync.Mutex
 	workers   map[*workerState]struct{}
+	draining  bool
 
 	inflight atomic.Int32
 	wake     chan struct{}
@@ -367,15 +368,6 @@ func (d *Downloader) Run(ctx context.Context, t *FileTask, sink *fcio.File, prog
 		},
 	}
 
-	d.mu.Lock()
-	d.files[task.FileID] = fd
-	d.mu.Unlock()
-	defer func() {
-		d.mu.Lock()
-		delete(d.files, task.FileID)
-		d.mu.Unlock()
-	}()
-
 	d.cfg.Stats.SetFileTotal(task.FileID, task.Size)
 	defer d.cfg.Stats.RemoveFile(task.FileID)
 
@@ -396,6 +388,17 @@ func (d *Downloader) Run(ctx context.Context, t *FileTask, sink *fcio.File, prog
 			fd.fileSpan.SetStatus(codes.Ok, "")
 		}
 		fd.fileSpan.End()
+	}()
+
+	d.mu.Lock()
+	d.files[task.FileID] = fd
+	d.mu.Unlock()
+	defer func() {
+		d.mu.Lock()
+		if d.files[task.FileID] == fd {
+			delete(d.files, task.FileID)
+		}
+		d.mu.Unlock()
 	}()
 
 	// Checkpoint ticker: per active file every CheckpointInterval. It is
@@ -507,6 +510,10 @@ func (fd *fileDownload) notifyWake() {
 // setParallelism reconciles the live worker set with n.
 func (fd *fileDownload) setParallelism(n int) {
 	fd.workersMu.Lock()
+	if fd.draining {
+		fd.workersMu.Unlock()
+		return
+	}
 	cur := len(fd.workers)
 	for i := cur; i < n; i++ {
 		ws := &workerState{}
@@ -538,5 +545,16 @@ func (fd *fileDownload) setParallelism(n int) {
 func (fd *fileDownload) removeWorker(ws *workerState) {
 	fd.workersMu.Lock()
 	delete(fd.workers, ws)
+	last := len(fd.workers) == 0
+	if last {
+		fd.draining = true
+	}
 	fd.workersMu.Unlock()
+	if last {
+		fd.d.mu.Lock()
+		if fd.d.files[fd.task.FileID] == fd {
+			delete(fd.d.files, fd.task.FileID)
+		}
+		fd.d.mu.Unlock()
+	}
 }

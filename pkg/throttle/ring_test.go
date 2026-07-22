@@ -1,6 +1,7 @@
 package throttle
 
 import (
+	"sync"
 	"testing"
 	"time"
 )
@@ -39,5 +40,28 @@ func TestWindowRingWindowBoundaries(t *testing.T) {
 	// reads before any write are zero
 	if got := r.Sum(base.Add(-time.Hour), 0); got != 0 {
 		t.Fatalf("Sum at -1h = %d, want 0", got)
+	}
+}
+
+func TestWindowRingConcurrentRolloverPreservesWrites(t *testing.T) {
+	r := newWindowRing(1)
+	base := time.Unix(1_700_000_000, 0)
+	const goroutines = 64
+	const writes = 1000
+
+	var wg sync.WaitGroup
+	for g := range goroutines {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			for i := range writes {
+				r.Add(base.Add(time.Duration((g+i)&1)*time.Second), 0, 1)
+			}
+		}()
+	}
+	wg.Wait()
+
+	if got := r.Sum(base.Add(time.Second), 0); got != goroutines*writes {
+		t.Fatalf("sum across boundary = %d, want %d", got, goroutines*writes)
 	}
 }

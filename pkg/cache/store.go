@@ -37,21 +37,8 @@ func OpenStore(ctx context.Context, root string, e *fcio.Engine, log *slog.Logge
 		return nil, fmt.Errorf("cache: resolve root %q: %w", root, err)
 	}
 	for _, dir := range []string{filepath.Join(abs, "blobs"), filepath.Join(abs, ".hfdl", "incomplete")} {
-		if err := os.MkdirAll(dir, 0o755); err != nil {
+		if err := mkdirAllSync(dir, 0o755, fsyncDir); err != nil {
 			return nil, fmt.Errorf("cache: create %s: %w", dir, err)
-		}
-	}
-	// Namespace durability: fsync each freshly-created directory and its
-	// parent so the blobs/ and incomplete/ entries survive a crash before
-	// the first blob lands (fsync of an existing dir on reopen is idempotent).
-	for _, dir := range []string{
-		abs,
-		filepath.Join(abs, "blobs"),
-		filepath.Join(abs, ".hfdl"),
-		filepath.Join(abs, ".hfdl", "incomplete"),
-	} {
-		if err := fsyncDir(dir); err != nil {
-			return nil, err
 		}
 	}
 	// huggingface_hub marks every cache root with a cache directory tag;
@@ -110,19 +97,27 @@ func (s *Store) HasBlob(blobID string) (path string, ok bool) {
 // separators, no "..", no absolute prefix. Blob ids come from repo metadata,
 // so this is the gate that keeps a hostile id from escaping blobs/.
 func validateBlobID(blobID string) error {
-	if n := len(blobID); n != 40 && n != 64 {
-		return &PathSafetyError{Path: blobID, Reason: "blob id must be 40 (sha1) or 64 (sha256) hex chars"}
+	return validateDigest(blobID, "blob id")
+}
+
+func validateCommitSHA(commitSHA string) error {
+	return validateDigest(commitSHA, "commit sha")
+}
+
+func validateDigest(digest, kind string) error {
+	if n := len(digest); n != 40 && n != 64 {
+		return &PathSafetyError{Path: digest, Reason: kind + " must be 40 (sha1) or 64 (sha256) lowercase hex chars"}
 	}
-	for i := 0; i < len(blobID); i++ {
-		if !isHexDigit(blobID[i]) {
-			return &PathSafetyError{Path: blobID, Reason: "blob id must be hex"}
+	for i := 0; i < len(digest); i++ {
+		if !isLowerHexDigit(digest[i]) {
+			return &PathSafetyError{Path: digest, Reason: kind + " must be lowercase hex"}
 		}
 	}
 	return nil
 }
 
-func isHexDigit(c byte) bool {
-	return (c >= '0' && c <= '9') || (c >= 'a' && c <= 'f') || (c >= 'A' && c <= 'F')
+func isLowerHexDigit(c byte) bool {
+	return (c >= '0' && c <= '9') || (c >= 'a' && c <= 'f')
 }
 
 // createEmptyFile leaves an empty file at path — the shape of

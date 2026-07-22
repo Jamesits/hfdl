@@ -6,6 +6,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"math"
 
 	"golang.org/x/sys/unix"
 )
@@ -26,5 +27,10 @@ func statfsFree(ctx context.Context, dir string) (int64, error) {
 	if err := unix.Statfs(dir, &st); err != nil {
 		return 0, fmt.Errorf("sched: statfs %s: %w", dir, err)
 	}
-	return int64(st.Bavail) * int64(st.Bsize), nil //nolint:unconvert // Bsize width varies by OS
+	bavail := uint64(st.Bavail)
+	bsize := uint64(st.Bsize) //nolint:unconvert // Bsize width varies by OS
+	if bsize != 0 && bavail > uint64(math.MaxInt64)/bsize {
+		return math.MaxInt64, nil
+	}
+	return int64(bavail * bsize), nil
 }

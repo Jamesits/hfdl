@@ -299,7 +299,7 @@ func (s *httpSource) Open(ctx context.Context, off, length int64) (io.ReadCloser
 		cancel()
 		return nil, &rangeNotSatisfiableError{upstream: up.Endpoint}
 	case http.StatusTooManyRequests, http.StatusServiceUnavailable:
-		ra := parseRetryAfter(resp.Header.Get("Retry-After"))
+		ra := config.ParseRetryAfter(resp.Header.Get("Retry-After"))
 		st := resp.StatusCode
 		_ = resp.Body.Close()
 		cancel()
@@ -458,29 +458,6 @@ func parseContentRange(v string) (start, end, total int64, ok bool) {
 		return 0, 0, 0, false
 	}
 	return start, end, total, true
-}
-
-// parseRetryAfter parses a Retry-After header: delta-seconds or an HTTP-date.
-// Returns 0 when absent or unparseable. Kept local (not hfapi.ParseRetryAfter)
-// so the transfer layer stays independent of hfapi — transfer builds its own
-// resolve URLs and never imports the Hub API client, by design.
-func parseRetryAfter(v string) time.Duration {
-	v = strings.TrimSpace(v)
-	if v == "" {
-		return 0
-	}
-	if secs, err := strconv.Atoi(v); err == nil {
-		if secs < 0 {
-			return 0
-		}
-		return time.Duration(secs) * time.Second
-	}
-	if t, err := http.ParseTime(v); err == nil {
-		if d := time.Until(t); d > 0 {
-			return d
-		}
-	}
-	return 0
 }
 
 // etagOf extracts the object identity: X-Linked-Etag wins over ETag (HF

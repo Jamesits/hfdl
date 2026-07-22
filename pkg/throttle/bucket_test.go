@@ -294,3 +294,41 @@ func TestBucketConcurrent(t *testing.T) {
 		t.Fatalf("consumed = %d, want roughly 10k-30k (rate 100k/s over 300ms)", got)
 	}
 }
+
+func TestBucketConcurrentSetRateTokenConservation(t *testing.T) {
+	b := NewBucket(100_000, 100, 100)
+	ctx, cancel := context.WithTimeout(t.Context(), 200*time.Millisecond)
+	defer cancel()
+
+	var consumed atomic.Int64
+	var wg sync.WaitGroup
+	wg.Add(2)
+	go func() {
+		defer wg.Done()
+		for i := int64(1); ctx.Err() == nil; i++ {
+			burst := int64(1 + i%100)
+			b.SetRate(100_000+i%10_000, burst)
+		}
+	}()
+	go func() {
+		defer wg.Done()
+		for {
+			if err := b.Wait(ctx, 1); err != nil {
+				return
+			}
+			consumed.Add(1)
+		}
+	}()
+	wg.Wait()
+
+	b.mu.Lock()
+	tokens := b.tokens
+	burst := b.burst.Load()
+	b.mu.Unlock()
+	if tokens < 0 || tokens > float64(burst) {
+		t.Fatalf("token balance = %v, want within [0,%d]", tokens, burst)
+	}
+	if got := b.ring.Sum(b.clock.Now(), 0); got != consumed.Load() {
+		t.Fatalf("recorded consumption = %d, successful consumption = %d", got, consumed.Load())
+	}
+}

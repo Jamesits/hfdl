@@ -2,6 +2,7 @@ package sched
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"math/rand/v2"
 	"sync"
@@ -9,6 +10,14 @@ import (
 
 	"github.com/jamesits/hfdl/pkg/store"
 )
+
+// FreeSpaceUnsupportedError reports that this platform has no reliable
+// filesystem free-space query.
+type FreeSpaceUnsupportedError struct{}
+
+func (*FreeSpaceUnsupportedError) Error() string {
+	return "sched: filesystem free-space query is unsupported on this platform"
+}
 
 // gate is a ctx-cancelable boolean condition with broadcast wakeups, used
 // for the operator pause and the ENOSPC pause — the two suspend levels.
@@ -295,7 +304,18 @@ func (m *Manager) enospcWatcher(ctx context.Context) {
 		demand := m.enospcDemandNow()
 		writable := false
 		free, err := m.statfsFreeFn(ctx, dir)
+		var unsupported *FreeSpaceUnsupportedError
 		switch {
+		case errors.As(err, &unsupported):
+			m.freeSpaceUnsupportedOnce.Do(func() {
+				m.log.Warn("free-space gate unsupported; disabling byte-count gate and using write probes", "err", err)
+			})
+			size := max(demand, probeMinBytes)
+			if perr := m.probeFn(ctx, dir, size); perr != nil {
+				failures++
+			} else {
+				writable = true
+			}
 		case err != nil:
 			m.log.Debug("statfs during ENOSPC pause failed", "err", err)
 		case free < demand:

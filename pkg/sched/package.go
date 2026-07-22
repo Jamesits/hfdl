@@ -5,7 +5,9 @@
 // rows are the queue and in-memory channels are wakeups. Rows are claimed
 // via store leases, gated by constraints (api-iops bucket +
 // per-(endpoint,stage) 429 cooldowns, bandwidth bucket, disk duty
-// limiter, ENOSPC global pause, operator pause) before every dequeue.
+// limiter, ENOSPC global pause, operator pause) before queue work. Metadata
+// cooldowns require the leased row's endpoint and are checked immediately
+// after dequeue; blocked rows are promptly deferred without consuming retry.
 //
 // Concurrency model: fixed worker pools per queue; the download queue is an
 // orchestrator that keeps at most Limits.MaxWorkers files in 'downloading',
@@ -17,7 +19,7 @@
 //
 // Durability: every state change goes through the store's guarded,
 // token-fenced transitions — a crashed or fenced worker can never publish
-// stale progress. Salvage rows are the one tokenless claim (MarkSalvaging);
-// sched keeps an in-memory claimed set for them since hfdl is
-// single-process per state DB.
+// stale progress. Salvage application uses the durable LeaseSalvage protocol:
+// salvaging rows carry a token, are heartbeated during copy, and are recovered
+// to queued after lease expiry.
 package sched

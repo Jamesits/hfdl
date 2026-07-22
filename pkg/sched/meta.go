@@ -65,6 +65,8 @@ func (m *Manager) metaWorker(ctx context.Context) {
 
 // processRepo runs one leased repo through listing.
 func (m *Manager) processRepo(ctx context.Context, repo *store.Repo, tok store.LeaseToken) {
+	ctx, cancel := context.WithCancel(ctx)
+	defer cancel()
 	log := m.log.With("repo", repo.Name, "revision", repo.Revision, "repo_id", repo.ID)
 
 	// Heartbeat keeps the listing lease alive across long paginations.
@@ -72,7 +74,7 @@ func (m *Manager) processRepo(ctx context.Context, repo *store.Repo, tok store.L
 	defer hbStop()
 	go m.heartbeat(hbCtx, func(until time.Time) error {
 		return m.st.RenewLease(ctx, store.LeaseRepo, repo.ID, tok, until)
-	}, nil)
+	}, cancel, "lease_kind", store.LeaseRepo, "repo_id", repo.ID)
 
 	// Any early return must put the row back promptly (a graceful shutdown
 	// would otherwise strand it until lease expiry).

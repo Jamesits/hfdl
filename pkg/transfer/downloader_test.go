@@ -12,6 +12,60 @@ import (
 	"github.com/jamesits/hfdl/pkg/config"
 )
 
+func TestEventChannelSaturationNeverBlocks(t *testing.T) {
+	d := testDownloader(t)
+	for i := 0; i < eventsCap; i++ {
+		d.emit(t.Context(), Event{FileID: int64(i)})
+	}
+	done := make(chan struct{})
+	go func() {
+		for i := 0; i < 17; i++ {
+			d.emit(t.Context(), Event{FileID: int64(i)})
+		}
+		close(done)
+	}()
+	select {
+	case <-done:
+	case <-time.After(time.Second):
+		t.Fatal("emit blocked on a saturated event channel")
+	}
+	if got := d.DroppedEvents(); got != 17 {
+		t.Fatalf("DroppedEvents = %d, want 17", got)
+	}
+}
+
+func TestSetParallelismConcurrentRunCompletion(t *testing.T) {
+	size := int64(512 << 10)
+	content := newContent(71, int(size))
+	fx := newFixture(t, content, "parallelism-race")
+	srv := fx.start()
+	leaser := newMemLeaser(size, 16<<10)
+	d := testDownloader(t)
+	task := taskFor(leaser, size, srv.URL)
+	task.Conns = 2
+	sink := openSink(t, size)
+
+	stop := make(chan struct{})
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		for n := 1; ; n = n%8 + 1 {
+			select {
+			case <-stop:
+				return
+			default:
+				d.SetParallelism(task.FileID, n)
+			}
+		}
+	}()
+	err := d.Run(t.Context(), task, sink, nil)
+	close(stop)
+	<-done
+	if err != nil {
+		t.Fatalf("run: %v", err)
+	}
+}
+
 // TestDownloadBasic: multi-block download assembles the file, emits block
 // lifecycle events, and the final checkpoint blob covers the whole file.
 func TestDownloadBasic(t *testing.T) {

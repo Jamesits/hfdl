@@ -16,12 +16,6 @@ import (
 	"golang.org/x/sys/windows"
 )
 
-// winDirectAlign is the alignment for the FILE_FLAG_NO_BUFFERING direct tier.
-// Modern volumes use 512- or 4096-byte sectors; 4096 is a multiple of both and
-// matches slabAlign — pool slabs are VirtualAlloc'd (page-aligned) so every
-// slab base satisfies the direct-tier buffer-address rule.
-const winDirectAlign int64 = 4096
-
 // winVolCaps mirrors the Linux volCaps JSON so the injected CapsCache carries
 // the same "volcaps:<id>" value shape across platforms.
 type winVolCaps struct {
@@ -85,6 +79,7 @@ func (e *Engine) Open(ctx context.Context, path string, size int64, h Hints) (*F
 				// FILE_FLAG_NO_BUFFERING accepted at probe time but rejected for
 				// this file: settle it onto the buffered tier.
 				e.logDebug("FILE_FLAG_NO_BUFFERING open rejected; buffered tier", "path", path, "err", derr)
+				e.downgradeWindowsDirect(ctx, path, align)
 			} else {
 				f.df = df
 				f.tier = tierDirect
@@ -292,11 +287,13 @@ func (f *File) declareSequential() {}
 // avoiding the FSCTL error such volumes return.
 func (f *File) clearSparse() error {
 	var info windows.ByHandleFileInformation
-	if err := windows.GetFileInformationByHandle(windows.Handle(f.f.Fd()), &info); err == nil {
-		if info.FileAttributes&windows.FILE_ATTRIBUTE_SPARSE_FILE != 0 {
-			if err := setSparse(f.f, false); err != nil {
-				return fmt.Errorf("fcio: clear sparse %s: %w", f.path, err)
+	inspectErr := windows.GetFileInformationByHandle(windows.Handle(f.f.Fd()), &info)
+	if inspectErr != nil || info.FileAttributes&windows.FILE_ATTRIBUTE_SPARSE_FILE != 0 {
+		if err := setSparse(f.f, false); err != nil {
+			if inspectErr != nil {
+				return fmt.Errorf("fcio: inspect sparse attribute %s: %v; clear sparse: %w", f.path, inspectErr, err)
 			}
+			return fmt.Errorf("fcio: clear sparse %s: %w", f.path, err)
 		}
 	}
 	if err := f.f.Sync(); err != nil {
@@ -309,7 +306,7 @@ func (f *File) clearSparse() error {
 // capability of the volume behind path, persisted through the injected
 // CapsCache under the same "volcaps:<id>" key scheme as Linux.
 func (e *Engine) windowsDirectCaps(ctx context.Context, path string) (bool, int64) {
-	align := winDirectAlign
+	align := volumeDirectAlignment(path)
 	dev, err := statVolumeID(path)
 	if err != nil {
 		return false, align
@@ -330,10 +327,17 @@ func (e *Engine) windowsDirectCaps(ctx context.Context, path string) (bool, int6
 			}
 		}
 	}
-	directOK := probeWindowsDirect(filepath.Dir(path), align)
+	var directOK, cacheable bool
+	if align > slabAlign {
+		directOK, cacheable = false, true
+	} else {
+		directOK, cacheable = probeWindowsDirect(filepath.Dir(path), align)
+	}
 	c := &winVolCaps{DirectOK: directOK, Align: align}
-	e.vols.Store(key, c)
-	if e.caps != nil {
+	if cacheable {
+		e.vols.Store(key, c)
+	}
+	if cacheable && e.caps != nil {
 		if raw, err := json.Marshal(c); err == nil {
 			if err := e.caps.PutCaps(ctx, key, raw); err != nil {
 				e.logDebug("caps cache write failed", "key", key, "err", err)
@@ -344,28 +348,43 @@ func (e *Engine) windowsDirectCaps(ctx context.Context, path string) (bool, int6
 	return directOK, align
 }
 
+func (e *Engine) downgradeWindowsDirect(ctx context.Context, path string, align int64) {
+	dev, err := statVolumeID(path)
+	if err != nil {
+		return
+	}
+	key := "volcaps:" + string(dev)
+	c := &winVolCaps{DirectOK: false, Align: align}
+	e.vols.Store(key, c)
+	if e.caps != nil {
+		if raw, err := json.Marshal(c); err == nil {
+			_ = e.caps.PutCaps(ctx, key, raw)
+		}
+	}
+}
+
 // probeWindowsDirect writes and reads back one aligned block through a
 // FILE_FLAG_NO_BUFFERING handle on a temp file, verifying the bytes round-trip.
-func probeWindowsDirect(dir string, align int64) bool {
+func probeWindowsDirect(dir string, align int64) (ok, cacheable bool) {
 	tmp, err := os.CreateTemp(dir, ".hfdl-dioprobe-*")
 	if err != nil {
-		return false
+		return false, false
 	}
 	name := tmp.Name()
 	if cerr := tmp.Close(); cerr != nil {
 		_ = os.Remove(name)
-		return false
+		return false, false
 	}
 	defer func() { _ = os.Remove(name) }()
 	df, err := createFileHandle(name, false, true)
 	if err != nil {
-		return false
+		return false, errors.Is(err, windows.ERROR_INVALID_PARAMETER) || errors.Is(err, windows.ERROR_NOT_SUPPORTED)
 	}
 	defer df.Close()
 	size := int((align + slabAlign - 1) / slabAlign * slabAlign)
 	buf, err := allocArena(int64(2 * size))
 	if err != nil {
-		return false
+		return false, false
 	}
 	defer func() { _ = freeArena(buf) }()
 	src := buf[:align]
@@ -374,10 +393,10 @@ func probeWindowsDirect(dir string, align int64) bool {
 		src[i] = byte(i*7 + 1)
 	}
 	if _, err := df.WriteAt(src, 0); err != nil {
-		return false
+		return false, errors.Is(err, windows.ERROR_INVALID_PARAMETER) || errors.Is(err, windows.ERROR_NOT_SUPPORTED)
 	}
 	if _, err := df.ReadAt(dst, 0); err != nil {
-		return false
+		return false, errors.Is(err, windows.ERROR_INVALID_PARAMETER) || errors.Is(err, windows.ERROR_NOT_SUPPORTED)
 	}
-	return bytes.Equal(src, dst)
+	return bytes.Equal(src, dst), true
 }

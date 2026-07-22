@@ -9,8 +9,9 @@ import (
 )
 
 // writeProbe on genuinely-unknown platforms (Linux/Windows/macOS have real
-// reservation probes): a demand-sized ftruncate — a full disk rejects the
-// extend — plus a one-page write + fsync in a temp file, cleaned up.
+// reservation probes): a demand-sized ftruncate plus a one-page write + fsync
+// in a temp file. Truncate allocation semantics are platform-dependent, so
+// this is deliberately only a best-effort probe on unknown platforms.
 func writeProbe(ctx context.Context, dir string, bytes int64) error {
 	if err := ctx.Err(); err != nil {
 		return err

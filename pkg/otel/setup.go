@@ -4,6 +4,8 @@ import (
 	"context"
 	"fmt"
 	"log/slog"
+	"strconv"
+	"strings"
 	"sync/atomic"
 
 	"go.opentelemetry.io/contrib/bridges/otelslog"
@@ -90,7 +92,14 @@ func Setup(ctx context.Context, getenv func(string) string, version string, src 
 	if on, unknown := signalExporter(getenv, "TRACES"); unknown != "" {
 		errHandler.logUnknown(envTracesExporter, unknown)
 	} else if on {
-		tp, err := setupTracer(ctx, getenv, res)
+		sampler, err := traceSampler(getenv)
+		if err != nil {
+			if log != nil {
+				log.Warn("invalid OTEL trace sampler, using parentbased_always_on", "err", err)
+			}
+			sampler = sdktrace.ParentBased(sdktrace.AlwaysSample())
+		}
+		tp, err := setupTracer(ctx, getenv, res, sampler)
 		if err != nil {
 			return fail(err)
 		}
@@ -130,7 +139,7 @@ func Setup(ctx context.Context, getenv func(string) string, version string, src 
 // setupTracer builds the SDK TracerProvider. The SDK honors
 // OTEL_TRACES_SAMPLER(+_ARG) with a parentbased_always_on default, and the
 // batch processor honors OTEL_BSP_*; exporters read OTEL_EXPORTER_OTLP_*.
-func setupTracer(ctx context.Context, getenv func(string) string, res *resource.Resource) (*sdktrace.TracerProvider, error) {
+func setupTracer(ctx context.Context, getenv func(string) string, res *resource.Resource, sampler sdktrace.Sampler) (*sdktrace.TracerProvider, error) {
 	var (
 		exp sdktrace.SpanExporter
 		err error
@@ -146,7 +155,42 @@ func setupTracer(ctx context.Context, getenv func(string) string, res *resource.
 	return sdktrace.NewTracerProvider(
 		sdktrace.WithResource(res),
 		sdktrace.WithBatcher(exp),
+		sdktrace.WithSampler(sampler),
 	), nil
+}
+
+func traceSampler(getenv func(string) string) (sdktrace.Sampler, error) {
+	name := strings.ToLower(strings.TrimSpace(getenv("OTEL_TRACES_SAMPLER")))
+	if name == "" {
+		name = "parentbased_always_on"
+	}
+	ratio := func() (sdktrace.Sampler, error) {
+		v, err := strconv.ParseFloat(strings.TrimSpace(getenv("OTEL_TRACES_SAMPLER_ARG")), 64)
+		if err != nil || v < 0 || v > 1 {
+			return nil, fmt.Errorf("OTEL_TRACES_SAMPLER_ARG must be a number from 0 to 1")
+		}
+		return sdktrace.TraceIDRatioBased(v), nil
+	}
+	switch name {
+	case "always_on":
+		return sdktrace.AlwaysSample(), nil
+	case "always_off":
+		return sdktrace.NeverSample(), nil
+	case "traceidratio":
+		return ratio()
+	case "parentbased_always_on":
+		return sdktrace.ParentBased(sdktrace.AlwaysSample()), nil
+	case "parentbased_always_off":
+		return sdktrace.ParentBased(sdktrace.NeverSample()), nil
+	case "parentbased_traceidratio":
+		s, err := ratio()
+		if err != nil {
+			return nil, err
+		}
+		return sdktrace.ParentBased(s), nil
+	default:
+		return nil, fmt.Errorf("unknown OTEL_TRACES_SAMPLER %q", name)
+	}
 }
 
 // setupMeter builds the SDK MeterProvider with a periodic reader on the

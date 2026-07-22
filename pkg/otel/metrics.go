@@ -20,9 +20,10 @@ type CooldownSample struct {
 // throttle Bucket/DutyLimiter stats onto it; pkg/otel never imports those
 // packages.
 //
-// Labeled series use maps keyed by the attribute value (upstream, bucket,
-// queue, media). Keys MUST come from bounded, code-controlled sets — never
-// from file paths, block ids, or repo names (cardinality hard rule).
+// The allowlist bounds attribute names, not value cardinality. Callers bound
+// values: upstream endpoints are configuration-derived and few in practice,
+// while bucket, queue, and media values come from code-controlled sets. Values
+// must never contain file paths, block IDs, or repository names.
 type Metrics struct {
 	DownloadSpeed float64            // hfdl.download.speed (By/s)
 	UpstreamSpeed map[string]float64 // hfdl.upstream.speed, key = upstream

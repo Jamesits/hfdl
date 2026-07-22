@@ -1,12 +1,30 @@
 package store
 
 import (
+	"bufio"
 	"context"
 	"errors"
+	"fmt"
+	"os"
+	"os/exec"
 	"path/filepath"
 	"testing"
 	"time"
 )
+
+func TestLockChild(t *testing.T) {
+	path := os.Getenv("HFDL_TEST_LOCK_CHILD")
+	if path == "" {
+		return
+	}
+	s, err := Open(t.Context(), path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer s.Close(t.Context()) //nolint:errcheck
+	fmt.Println("ready")
+	_, _ = bufio.NewReader(os.Stdin).ReadByte()
+}
 
 func openTestStore(t *testing.T) *Store {
 	t.Helper()
@@ -152,6 +170,37 @@ func TestSecondOpenFailsLocked(t *testing.T) {
 	_, err := Open(t.Context(), s.path)
 	if !errors.Is(err, ErrLocked) {
 		t.Fatalf("second Open err = %v, want ErrLocked", err)
+	}
+}
+
+func TestCrossProcessOpenFailsLocked(t *testing.T) {
+	if os.Getenv("HFDL_TEST_LOCK_CHILD") != "" {
+		t.Skip("lock child")
+	}
+	path := filepath.Join(t.TempDir(), "state.db")
+	cmd := exec.Command(os.Args[0], "-test.run=^TestLockChild$")
+	cmd.Env = append(os.Environ(), "HFDL_TEST_LOCK_CHILD="+path)
+	stdout, err := cmd.StdoutPipe()
+	if err != nil {
+		t.Fatal(err)
+	}
+	stdin, err := cmd.StdinPipe()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := cmd.Start(); err != nil {
+		t.Fatal(err)
+	}
+	defer func() {
+		_ = stdin.Close()
+		_ = cmd.Wait()
+	}()
+	line, err := bufio.NewReader(stdout).ReadString('\n')
+	if err != nil || line != "ready\n" {
+		t.Fatalf("lock child readiness = %q, %v", line, err)
+	}
+	if _, err := Open(t.Context(), path); !errors.Is(err, ErrLocked) {
+		t.Fatalf("cross-process Open err = %v, want ErrLocked", err)
 	}
 }
 

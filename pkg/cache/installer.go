@@ -29,10 +29,6 @@ const (
 // the destination directory so the final rename stays on one filesystem.
 const tmpPrefix = ".hfdl-tmp-"
 
-// tmpSuffix is appended to a target path for in-place atomic rewrites (refs)
-// where the temp must sit beside the target so the rename stays intra-dir.
-const tmpSuffix = ".tmp"
-
 // InstallRequest is one job_files row's worth of install work.
 type InstallRequest struct {
 	DestMode string // "cache" | "local-dir"
@@ -137,10 +133,13 @@ func (in *Installer) installCache(ctx context.Context, r InstallRequest, blobPat
 	if err := validateBlobID(r.BlobID); err != nil {
 		return "", err
 	}
+	if err := validateCommitSHA(r.CommitSHA); err != nil {
+		return "", fmt.Errorf("cache: invalid snapshot commit: %w", err)
+	}
 	base := filepath.Join(r.CacheDir, dirName)
 
 	lockDir := filepath.Join(r.CacheDir, ".locks", dirName)
-	if err := os.MkdirAll(lockDir, 0o755); err != nil {
+	if err := mkdirAllSync(lockDir, 0o755, in.fsyncDirFn); err != nil {
 		return "", fmt.Errorf("cache: create locks dir: %w", err)
 	}
 	if err := createEmptyFile(filepath.Join(lockDir, r.BlobID+".lock")); err != nil {
@@ -159,27 +158,19 @@ func (in *Installer) installCache(ctx context.Context, r InstallRequest, blobPat
 		return "", err
 	}
 	refDir := filepath.Dir(refPath)
-	if err := os.MkdirAll(refDir, 0o755); err != nil {
+	if err := mkdirAllSync(refDir, 0o755, in.fsyncDirFn); err != nil {
 		return "", fmt.Errorf("cache: create refs dir: %w", err)
 	}
-	refTmp := refPath + tmpSuffix
-	if err := writeFileSync(refTmp, []byte(r.CommitSHA), 0o644); err != nil {
-		return "", err
-	}
-	if err := replaceFile(refTmp, refPath); err != nil {
-		_ = os.Remove(refTmp)
-		return "", fmt.Errorf("cache: rename %s → %s: %w", refTmp, refPath, err)
-	}
-	if err := in.fsyncDirFn(refDir); err != nil {
+	if err := atomicWriteFileSync(refPath, []byte(r.CommitSHA), 0o644, in.fsyncDirFn); err != nil {
 		return "", err
 	}
 
-	final, err := SafeJoin(filepath.Join(base, "snapshots", r.CommitSHA), r.RepoPath)
+	final, err := SafeJoin(r.CacheDir, filepath.Join(dirName, "snapshots", r.CommitSHA, r.RepoPath))
 	if err != nil {
 		return "", err
 	}
 	parent := filepath.Dir(final)
-	if err := os.MkdirAll(parent, 0o755); err != nil {
+	if err := mkdirAllSync(parent, 0o755, in.fsyncDirFn); err != nil {
 		return "", fmt.Errorf("cache: create snapshot dir: %w", err)
 	}
 
@@ -231,7 +222,7 @@ func (in *Installer) installLocalDir(ctx context.Context, r InstallRequest, blob
 		return "", err
 	}
 	parent := filepath.Dir(dest)
-	if err := os.MkdirAll(parent, 0o755); err != nil {
+	if err := mkdirAllSync(parent, 0o755, in.fsyncDirFn); err != nil {
 		return "", fmt.Errorf("cache: create dest dir: %w", err)
 	}
 	tmp := tmpPath(parent)
@@ -268,7 +259,7 @@ func (in *Installer) installLocalDir(ctx context.Context, r InstallRequest, blob
 		span.SetStatus(codes.Error, err.Error())
 		return "", err
 	}
-	if err := replaceFile(tmp, dest); err != nil {
+	if err := fcio.ReplaceFile(tmp, dest); err != nil {
 		_ = os.Remove(tmp)
 		span.RecordError(err)
 		span.SetStatus(codes.Error, err.Error())
@@ -317,7 +308,7 @@ func (in *Installer) installCopy(ctx context.Context, src, final string, size in
 		span.SetStatus(codes.Error, err.Error())
 		return err
 	}
-	if err := replaceFile(tmp, final); err != nil {
+	if err := fcio.ReplaceFile(tmp, final); err != nil {
 		_ = os.Remove(tmp)
 		span.RecordError(err)
 		span.SetStatus(codes.Error, err.Error())
@@ -411,10 +402,15 @@ func (in *Installer) placeSymlink(relTarget, final, blobPath string) error {
 	if ok, serr := sameBlob(final, blobPath); serr == nil && ok {
 		return nil
 	}
-	if rerr := os.Remove(final); rerr != nil {
-		return fmt.Errorf("cache: replace %s: %w", final, rerr)
+	tmp, err := uniqueTempName(filepath.Dir(final))
+	if err != nil {
+		return err
 	}
-	return in.symlinkFn(relTarget, final)
+	defer func() { _ = os.Remove(tmp) }()
+	if err := in.symlinkFn(relTarget, tmp); err != nil {
+		return err
+	}
+	return fcio.ReplaceFile(tmp, final)
 }
 
 // placeHardlink is placeSymlink for hardlinks (link-less-FS fallback).
@@ -429,10 +425,31 @@ func (in *Installer) placeHardlink(blobPath, final string) error {
 	if ok, serr := sameBlob(final, blobPath); serr == nil && ok {
 		return nil
 	}
-	if rerr := os.Remove(final); rerr != nil {
-		return fmt.Errorf("cache: replace %s: %w", final, rerr)
+	tmp, err := uniqueTempName(filepath.Dir(final))
+	if err != nil {
+		return err
 	}
-	return in.linkFn(blobPath, final)
+	defer func() { _ = os.Remove(tmp) }()
+	if err := in.linkFn(blobPath, tmp); err != nil {
+		return err
+	}
+	return fcio.ReplaceFile(tmp, final)
+}
+
+func uniqueTempName(dir string) (string, error) {
+	f, err := os.CreateTemp(dir, tmpPrefix)
+	if err != nil {
+		return "", fmt.Errorf("cache: create temp in %s: %w", dir, err)
+	}
+	name := f.Name()
+	if err := f.Close(); err != nil {
+		_ = os.Remove(name)
+		return "", err
+	}
+	if err := os.Remove(name); err != nil {
+		return "", err
+	}
+	return name, nil
 }
 
 // sameBlob reports whether final already designates blobPath — a symlink

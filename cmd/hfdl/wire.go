@@ -24,6 +24,7 @@ import (
 	"github.com/jamesits/hfdl/pkg/tui"
 	"github.com/jamesits/hfdl/pkg/verify"
 	"github.com/jamesits/hfdl/pkg/xet"
+	"github.com/mattn/go-isatty"
 	"go.opentelemetry.io/otel/attribute"
 	"go.opentelemetry.io/otel/codes"
 	"go.opentelemetry.io/otel/trace"
@@ -85,6 +86,7 @@ type wireApp struct {
 	ring    *logging.Ring
 	store   *store.Store
 	prov    *otel.Providers
+	pool    *fcio.Pool
 	manager manager
 	stashed *config.Limits // pre-pause limits for the TUI pause toggle
 
@@ -127,6 +129,13 @@ func (a *wireApp) close(ctx context.Context) {
 			a.log.LogAttrs(flush, slog.LevelWarn, "state store close failed", slog.Any("err", err))
 		}
 		scancel()
+	}
+	// Unmap the IO buffer arena last: the manager is drained by now, so no
+	// worker holds pool buffers, and nothing after this touches file IO.
+	if a.pool != nil {
+		if err := a.pool.Close(); err != nil {
+			a.log.LogAttrs(flush, slog.LevelWarn, "buffer pool close failed", slog.Any("err", err))
+		}
 	}
 }
 
@@ -204,7 +213,10 @@ func (app *wireApp) wireComponents(ctx context.Context, p *downloadPlan, getenv 
 	downloadTimeout := config.DownloadTimeout(getenv)
 	// hfdl.api.requests: one shared counter, each client labels it with its
 	// own endpoint. Noop when telemetry is disabled.
-	apiRequests, _ := prov.Counter(prov.Meter("hfdl.hfapi"), "hfdl.api.requests", "{request}")
+	apiRequests, err := prov.Counter(prov.Meter("hfdl.hfapi"), "hfdl.api.requests", "{request}")
+	if err != nil {
+		log.Warn("telemetry counter registration failed", "instrument", "hfdl.api.requests", "err", err)
+	}
 	clients := make(map[string]*hfapi.Client, len(p.endpoints))
 	for _, ep := range p.endpoints {
 		c := hfapi.NewClient(log, hc, ep, p.token, etagTimeout)
@@ -223,7 +235,10 @@ func (app *wireApp) wireComponents(ctx context.Context, p *downloadPlan, getenv 
 	if poolCap == 0 {
 		poolCap = clamp(fcioPoolSlab*int64(p.limits.Conns)*2, fcioPoolMinCap, fcioPoolMaxCap)
 	}
-	pool := fcio.NewPool(fcioPoolSlab, poolCap)
+	// Pass the process logger so an mmap→heap arena fallback is visible in
+	// production logs, not just under tests.
+	pool := fcio.NewPool(fcioPoolSlab, poolCap, log)
+	app.pool = pool
 	// Back the engine's scratch reads with the same pool so ReadAll obeys the
 	// --io-buffer cap and back-pressures instead of self-allocating mappings.
 	engine.SetPool(pool)
@@ -242,7 +257,10 @@ func (app *wireApp) wireComponents(ctx context.Context, p *downloadPlan, getenv 
 	api := throttle.NewBucket(p.limits.APIIOPS, p.limits.APIBurst, 1)
 	// hfdl.throttle.wait_seconds: one shared counter, each bucket labels it
 	// with its own name. Noop when telemetry is disabled.
-	waitSeconds, _ := prov.FloatCounter(prov.Meter("hfdl.throttle"), "hfdl.throttle.wait_seconds", "s")
+	waitSeconds, err := prov.FloatCounter(prov.Meter("hfdl.throttle"), "hfdl.throttle.wait_seconds", "s")
+	if err != nil {
+		log.Warn("telemetry counter registration failed", "instrument", "hfdl.throttle.wait_seconds", "err", err)
+	}
 	bandwidth.SetWaitCounter(waitSeconds, "bandwidth")
 	api.SetWaitCounter(waitSeconds, "api")
 	duty := throttle.NewDutyLimiter(p.limits.DiskActivePct, throttle.MediaUnknown)
@@ -564,6 +582,5 @@ func clamp(v, lo, hi int64) int64 {
 var stdoutIsTTY = defaultStdoutIsTTY
 
 func defaultStdoutIsTTY() bool {
-	fi, err := os.Stdout.Stat()
-	return err == nil && fi.Mode()&os.ModeCharDevice != 0
+	return isatty.IsTerminal(os.Stdout.Fd()) || isatty.IsCygwinTerminal(os.Stdout.Fd())
 }

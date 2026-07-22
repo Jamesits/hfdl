@@ -21,8 +21,8 @@ import (
 // package. The zero value is NOT usable; obtain it via Setup or Noop.
 //
 // When Enabled is false every field holds an API-level noop implementation:
-// deriving tracers/meters, bridging slog and wrapping transports are all
-// allocation-free no-ops, and Shutdown succeeds immediately.
+// deriving tracers/meters, bridging slog and wrapping transports have no
+// telemetry side effects, and Shutdown succeeds immediately.
 type Providers struct {
 	Enabled bool
 

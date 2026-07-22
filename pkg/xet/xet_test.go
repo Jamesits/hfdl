@@ -2,11 +2,52 @@ package xet
 
 import (
 	"bytes"
+	"context"
 	"errors"
 	"io"
+	"log/slog"
+	"net/http"
+	"net/http/httptest"
 	"strings"
 	"testing"
+	"time"
+
+	"github.com/jamesits/hfdl/pkg/hfapi"
 )
+
+func (c *chunkCache) stats() (int, int64) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return len(c.entries), c.total
+}
+
+func TestCASAuthorizationStrippedOnCrossOriginRedirect(t *testing.T) {
+	target := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if got := r.Header.Get("Authorization"); got != "" {
+			t.Errorf("redirect target received Authorization %q", got)
+		}
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer target.Close()
+
+	cas := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if got := r.Header.Get("Authorization"); got != "Bearer cas-secret" {
+			t.Errorf("CAS received Authorization %q", got)
+		}
+		http.Redirect(w, r, target.URL+"/object", http.StatusFound)
+	}))
+	defer cas.Close()
+
+	tokens := func(context.Context, string) (*hfapi.XetToken, error) {
+		return &hfapi.XetToken{AccessToken: "cas-secret", CasURL: cas.URL, Exp: time.Now().Add(time.Hour)}, nil
+	}
+	c := NewClient(slog.New(slog.DiscardHandler), &http.Client{}, Config{}, tokens, nil)
+	resp, err := c.doCAS(t.Context(), "/refresh", cas.URL+"/v2/reconstructions/id", "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	_ = resp.Body.Close()
+}
 
 // TestPartialReconstruction verifies the Range-header query path and
 // offset_into_first_range semantics (cas_types/mod.rs: for a range query

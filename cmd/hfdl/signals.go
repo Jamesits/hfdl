@@ -5,7 +5,7 @@ import (
 	"log/slog"
 	"os"
 	"os/signal"
-	"syscall"
+	"sync"
 )
 
 // watchSignals wires graceful shutdown: the first SIGINT/SIGTERM cancels the
@@ -18,6 +18,7 @@ import (
 // stop() detaches the OS delivery (signal.Stop) and ends the watcher.
 func watchSignals(ctx context.Context, cancel context.CancelFunc, sigCh chan os.Signal) (stop func()) {
 	done := make(chan struct{})
+	var once sync.Once
 	go func() {
 		var canceled bool
 		for {
@@ -41,15 +42,9 @@ func watchSignals(ctx context.Context, cancel context.CancelFunc, sigCh chan os.
 		}
 	}()
 	return func() {
-		signal.Stop(sigCh)
-		close(done)
+		once.Do(func() {
+			signal.Stop(sigCh)
+			close(done)
+		})
 	}
-}
-
-// defaultSignalChan delivers SIGINT/SIGTERM for the real CLI. It returns the
-// bidirectional channel so watchSignals's stop can signal.Stop it.
-func defaultSignalChan() chan os.Signal {
-	ch := make(chan os.Signal, 2)
-	signal.Notify(ch, os.Interrupt, syscall.SIGTERM)
-	return ch
 }

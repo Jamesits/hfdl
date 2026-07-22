@@ -101,9 +101,8 @@ func (e *Engine) logDebug(msg string, args ...any) {
 	}
 }
 
-// Sequential-read pipeline depths by media class: the direct tier bypasses
-// kernel readahead, so reads run an application-level readahead ring; on the
-// fadvise tier the ring complements FADV_SEQUENTIAL.
+// Sequential-read pipeline depths by media class. Only the direct tier uses
+// the application-level ring because it bypasses kernel readahead.
 const (
 	readDepthSSD     = 4
 	readDepthHDD     = 2

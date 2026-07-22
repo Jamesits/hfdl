@@ -28,6 +28,7 @@ func TestWatchSignalsStopsCleanly(t *testing.T) {
 	sigCh := make(chan os.Signal, 1)
 	stop := watchSignals(ctx, cancel, sigCh)
 	stop()
+	stop()
 	cancel() // must not deadlock or panic with the watcher detached
 }
 

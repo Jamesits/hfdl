@@ -3,8 +3,8 @@
 //
 // The client is deliberately stateless with respect to queues and SQLite:
 // rate-limit hits are reported as typed errors (*RateLimitError) and the
-// caller (sched) owns cooldown policy. Revision pins rev -> commit_sha once
-// per repo so a moving branch cannot mix file versions mid-run.
+// caller (sched) owns cooldown policy. Revision resolves rev -> commit_sha;
+// callers own pinning that immutable revision across a run.
 //
 // Auth: the bearer token is attached to Hub-host requests only and stripped
 // on cross-host (CDN/object-storage) redirects. This is the shared

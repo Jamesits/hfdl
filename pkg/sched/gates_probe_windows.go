@@ -11,7 +11,8 @@ import (
 // writeProbe proves writability of dir with a demand-sized reservation: a temp
 // file grown to bytes via SetEndOfFile (os.File.Truncate) — a full-disk or
 // quota-limited volume rejects the extend even when a one-page write would
-// still fit — plus a one-page write and fsync, cleaned up.
+// still fit. NTFS charges allocation for a non-sparse SetEndOfFile extension,
+// so Truncate is a reservation probe here. A one-page write and fsync follow.
 func writeProbe(ctx context.Context, dir string, bytes int64) error {
 	if err := ctx.Err(); err != nil {
 		return err

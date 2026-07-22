@@ -74,7 +74,7 @@ func (s *Store) LeaseMeta(ctx context.Context, now time.Time) (*Repo, LeaseToken
 func (s *Store) SetCommitSHA(ctx context.Context, repoID int64, tok LeaseToken, sha string) error {
 	return execGuarded(ctx, s.db, "set commit sha", repoID,
 		"UPDATE repos SET commit_sha = ?, updated_at = ? WHERE id = ? AND status = ? AND "+leaseGuard,
-		sha, utc(time.Now()), repoID, string(RepoListing), string(tok), string(tok))
+		sha, utc(time.Now()), repoID, string(RepoListing), string(tok))
 }
 
 // CompleteListing persists a listing in one tx: files are upserted by
@@ -92,7 +92,7 @@ func (s *Store) CompleteListing(ctx context.Context, repoID int64, tok LeaseToke
 		if err := execGuarded(ctx, tx, "complete listing", repoID,
 			"UPDATE repos SET status = ?, lease_owner = NULL, lease_token = NULL, lease_until = NULL, updated_at = ? "+
 				"WHERE id = ? AND status = ? AND "+leaseGuard,
-			string(RepoListed), now, repoID, string(RepoListing), string(tok), string(tok)); err != nil {
+			string(RepoListed), now, repoID, string(RepoListing), string(tok)); err != nil {
 			return err
 		}
 

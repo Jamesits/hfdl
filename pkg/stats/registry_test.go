@@ -268,6 +268,40 @@ func TestRemoveFile(t *testing.T) {
 	}
 }
 
+func TestRemoveFileWaitsForReachableUpdate(t *testing.T) {
+	r, _ := newTestRegistry()
+	r.AddFile(1, 1)
+	updateStarted := make(chan struct{})
+	releaseUpdate := make(chan struct{})
+	updateDone := make(chan struct{})
+	go func() {
+		r.updateFile(1, func(f *fileEntry) {
+			close(updateStarted)
+			<-releaseUpdate
+			f.done.Add(1)
+		})
+		close(updateDone)
+	}()
+	<-updateStarted
+
+	removeDone := make(chan struct{})
+	go func() {
+		r.RemoveFile(1)
+		close(removeDone)
+	}()
+	select {
+	case <-removeDone:
+		t.Fatal("RemoveFile returned while an update still held the entry reachable")
+	case <-time.After(10 * time.Millisecond):
+	}
+	close(releaseUpdate)
+	<-updateDone
+	<-removeDone
+	if _, ok := r.Snapshot().Files[1]; ok {
+		t.Fatal("in-flight update resurrected file after RemoveFile returned")
+	}
+}
+
 func TestSnapshotDeepCopyIsolation(t *testing.T) {
 	r, _ := newTestRegistry()
 	r.AddNetwork(10)

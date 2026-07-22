@@ -81,7 +81,10 @@ func TestUpstreams(t *testing.T) {
 	if err := s.UpdateUpstream(ctx, "https://cdn2.example", 5e7, true, nil, nil); err != nil {
 		t.Fatal(err)
 	}
-	ups, _ = s.UpstreamState(ctx)
+	ups, err = s.UpstreamState(ctx)
+	if err != nil {
+		t.Fatalf("UpstreamState after implicit insert: %v", err)
+	}
 	if len(ups) != 2 {
 		t.Fatalf("UpstreamState = %d, want 2 after implicit insert", len(ups))
 	}

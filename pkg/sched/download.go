@@ -347,7 +347,7 @@ func (m *Manager) runFile(ctx context.Context, cancel context.CancelFunc, f *sto
 		}
 		leaser.renew(ctx, until)
 		return nil
-	}, cancel)
+	}, cancel, "lease_kind", store.LeaseFile, "file_id", f.ID)
 
 	progress := func(pctx context.Context, fileID int64, blob []byte) error {
 		err := m.st.SaveProgress(pctx, fileID, tok, blob)
@@ -383,9 +383,23 @@ func (m *Manager) runFile(ctx context.Context, cancel context.CancelFunc, f *sto
 		m.log.Debug("download run cancelled, requeueing file", "file_id", f.ID, "path", f.Path)
 		m.resetFileToQueued(dctx, f, tok, nil)
 	default:
+		var cpe *transfer.CorruptProgressError
 		var rfe *transfer.ResetFileError
 		var the *transfer.TerminalHTTPError
 		switch {
+		case errors.As(err, &cpe):
+			// Transfer rejected the progress blob (e.g. recorded size !=
+			// file size, which sched's own parse cannot catch). The blob is
+			// the only resume record: clear it before requeueing, or the
+			// next pass reloads the same bad blob and loops forever.
+			m.log.Warn("progress blob rejected by transfer, clearing and requeueing",
+				"file_id", f.ID, "reason", cpe.Reason)
+			if serr := m.storeCall(dctx, func() error {
+				return m.st.SaveProgress(dctx, f.ID, tok, nil)
+			}); serr != nil && !errors.Is(serr, store.ErrFenced) {
+				m.log.Warn("clear corrupt progress failed", "file_id", f.ID, "err", serr)
+			}
+			m.resetFileToQueued(dctx, f, tok, err)
 		case errors.As(err, &rfe):
 			m.log.Warn("file reset requested by transfer", "file_id", f.ID, "reason", rfe.Reason)
 			m.resetFileToQueued(dctx, f, tok, err)
@@ -446,7 +460,16 @@ func (m *Manager) handleXetPrepareError(ctx context.Context, f *store.File, tok 
 		m.terminalFileError(ctx, f, tok, err)
 		return
 	}
-	if n, ierr := m.st.IncrFileRetries(ctx, f.ID, tok); ierr == nil && n >= maxBlockRetries {
+	n, ierr := m.st.IncrFileRetries(ctx, f.ID, tok)
+	if ierr != nil {
+		// If the durable counter cannot be advanced, requeueing would remove
+		// the only enforceable retry bound. Fail closed instead.
+		m.log.Error("increment xet prepare retry counter failed; failing file", "file_id", f.ID, "err", ierr)
+		m.terminalFileError(ctx, f, tok, fmt.Errorf("sched: cannot persist xet prepare retry: %w", ierr))
+		return
+	}
+	f.Retries = n
+	if n >= maxBlockRetries {
 		m.terminalFileError(ctx, f, tok,
 			fmt.Errorf("sched: xet prepare gave up after %d attempts: %w", n, err))
 		return

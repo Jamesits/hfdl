@@ -96,7 +96,10 @@ func (c *Client) Tree(ctx context.Context, rt RepoType, repo, rev, path string) 
 			return nil, fmt.Errorf("hfapi: close tree page %s: %w", u, closeErr)
 		}
 		for i := range page {
-			if page[i].Type == "directory" {
+			if page[i].Type != "file" {
+				if page[i].Type != "directory" {
+					c.log.Debug("ignoring unknown Hub tree row type", "type", page[i].Type, "path", page[i].Path)
+				}
 				continue
 			}
 			out = append(out, page[i].toFileEntry())

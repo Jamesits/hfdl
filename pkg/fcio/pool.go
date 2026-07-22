@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"log/slog"
+	"sync"
 	"sync/atomic"
 )
 
@@ -22,11 +23,13 @@ const (
 // Pool is one arena carved into aligned slabs with a free list; exhaustion
 // back-pressures callers in Get, coupling fetch rate to flush rate.
 type Pool struct {
-	slabSize int64
-	arena    []byte
-	free     chan *Buf
-	zero     *Buf
-	mmapped  bool // arena came from mmap (Close unmaps); false for heap fallback
+	slabSize  int64
+	arena     []byte
+	free      chan *Buf
+	zero      *Buf
+	mmapped   bool // arena came from mmap (Close unmaps); false for heap fallback
+	closeOnce sync.Once
+	closeErr  error
 }
 
 // NewPool mmaps an arena of floor(capBytes/slabSize) slabs plus one reserved
@@ -77,18 +80,18 @@ func (p *Pool) Slabs() int { return cap(p.free) }
 
 // Close unmaps the arena. Provided so a long-lived engine can reclaim the
 // mapping; no current caller requires it. It is a no-op on a heap-fallback
-// arena and after the first call. Bufs must not be used after Close.
+// arena and after the first call. Close must not race Get, Put, or use of a
+// checked-out Buf; concurrent Close calls are safe and return the same result.
 func (p *Pool) Close() error {
-	if !p.mmapped || p.arena == nil {
+	p.closeOnce.Do(func() {
+		if p.mmapped && p.arena != nil {
+			if err := freeArena(p.arena); err != nil {
+				p.closeErr = fmt.Errorf("fcio: pool close: %w", err)
+			}
+		}
 		p.arena = nil
-		return nil
-	}
-	arena := p.arena
-	p.arena = nil
-	if err := freeArena(arena); err != nil {
-		return fmt.Errorf("fcio: pool close: %w", err)
-	}
-	return nil
+	})
+	return p.closeErr
 }
 
 // Get takes a slab, blocking while the pool is exhausted (backpressure) or

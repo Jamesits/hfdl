@@ -10,8 +10,8 @@ import (
 // WAL write contention: a deferred store transaction that reads before it
 // writes can lose its snapshot to a concurrent writer and surface
 // SQLITE_BUSY_SNAPSHOT (517), which busy_timeout cannot absorb — the
-// transaction must be retried. storeCall wraps every store mutation sched
-// issues from concurrent workers with exactly that retry.
+// transaction must be retried. storeCall is used for guarded mutations whose
+// semantics permit replay after a busy result.
 const (
 	busyRetries    = 24
 	busyBackoffMin = 20 * time.Millisecond
@@ -34,9 +34,8 @@ func isBusy(err error) bool {
 }
 
 // storeCall runs fn, retrying SQLite-busy failures with capped exponential
-// backoff. The store's guards make every mutation idempotent or fenced, so
-// a retry after a committed-but-unacknowledged write is safe (it re-runs
-// the same guarded statement, which either re-applies or fences).
+// backoff. Callers must only pass mutations that are idempotent or fenced so
+// replay after a committed-but-unacknowledged write remains safe.
 func (m *Manager) storeCall(ctx context.Context, fn func() error) error {
 	var err error
 	backoff := busyBackoffMin

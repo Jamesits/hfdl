@@ -48,10 +48,6 @@ func (s *Store) LeaseFileForDownload(ctx context.Context, fileID int64, now time
 // no live block leases remain, so a stale writer can never race the
 // verifier (ErrLiveBlockLeases).
 func (s *Store) TransitionFile(ctx context.Context, fileID int64, tok LeaseToken, from, to FileStatus, cause error) error {
-	// Tokenless edge allowlist: the empty-token leaseGuard matches any
-	// unleased row, which would otherwise make TransitionFile an unrestricted
-	// status API. Only the salvage and offline-serve edges legitimately mutate
-	// an unleased row without a lease; every other change must be token-fenced.
 	if tok == "" && !tokenlessEdgeAllowed(from, to) {
 		return fmt.Errorf("store: transition file id=%d %s→%s: %w", fileID, from, to, ErrTokenlessEdge)
 	}
@@ -60,10 +56,16 @@ func (s *Store) TransitionFile(ctx context.Context, fileID int64, tok LeaseToken
 
 		// Ownership first: a fenced worker must see ErrFenced regardless of what
 		// the row's new owner is doing with it.
+		guard := leaseGuard
+		guardArgs := []any{string(tok)}
+		if tok == "" {
+			guard = "lease_token IS NULL"
+			guardArgs = nil
+		}
 		var owned bool
 		if err := tx.QueryRowContext(ctx,
-			"SELECT EXISTS(SELECT 1 FROM files WHERE id = ? AND status = ? AND "+leaseGuard+")",
-			fileID, string(from), string(tok), string(tok)).Scan(&owned); err != nil {
+			"SELECT EXISTS(SELECT 1 FROM files WHERE id = ? AND status = ? AND "+guard+")",
+			append([]any{fileID, string(from)}, guardArgs...)...).Scan(&owned); err != nil {
 			return fmt.Errorf("store: transition file: %w", err)
 		}
 		if !owned {
@@ -102,10 +104,11 @@ func (s *Store) TransitionFile(ctx context.Context, fileID int64, tok LeaseToken
 			msg := cause.Error()
 			lastErr = &msg
 		}
+		args := []any{string(to), lastErr, now, fileID, string(from)}
+		args = append(args, guardArgs...)
 		return execGuarded(ctx, tx, "transition file", fileID,
 			"UPDATE files SET status = ?, last_error = ?, lease_owner = NULL, lease_token = NULL, lease_until = NULL, updated_at = ? "+
-				"WHERE id = ? AND status = ? AND "+leaseGuard,
-			string(to), lastErr, now, fileID, string(from), string(tok), string(tok))
+				"WHERE id = ? AND status = ? AND "+guard, args...)
 	})
 }
 
@@ -117,10 +120,6 @@ func (s *Store) TransitionFile(ctx context.Context, fileID int64, tok LeaseToken
 // other edge must be fenced by a real lease token.
 func tokenlessEdgeAllowed(from, to FileStatus) bool {
 	switch {
-	case from == FileSalvaging && to == FileQueued:
-		return true
-	case from == FileSalvaging && to == FileDownloaded:
-		return true
 	case from == FileQueued && to == FileDownloaded:
 		return true
 	case from == FileCached && to == FileQueued:
@@ -141,7 +140,7 @@ func (s *Store) FinishDownloaded(ctx context.Context, fileID int64, tok LeaseTok
 		var owned bool
 		if err := tx.QueryRowContext(ctx,
 			"SELECT EXISTS(SELECT 1 FROM files WHERE id = ? AND status = ? AND "+leaseGuard+")",
-			fileID, string(FileDownloading), string(tok), string(tok)).Scan(&owned); err != nil {
+			fileID, string(FileDownloading), string(tok)).Scan(&owned); err != nil {
 			return fmt.Errorf("store: finish downloaded: %w", err)
 		}
 		if !owned {
@@ -155,20 +154,19 @@ func (s *Store) FinishDownloaded(ctx context.Context, fileID int64, tok LeaseTok
 		return execGuarded(ctx, tx, "finish downloaded", fileID,
 			"UPDATE files SET status = ?, last_error = NULL, lease_owner = NULL, lease_token = NULL, lease_until = NULL, updated_at = ? "+
 				"WHERE id = ? AND status = ? AND "+leaseGuard,
-			string(FileDownloaded), now, fileID, string(FileDownloading), string(tok), string(tok))
+			string(FileDownloaded), now, fileID, string(FileDownloading), string(tok))
 	})
 }
 
 // SaveProgress persists the durable-only checkpoint blob (fsynced bytes
 // only; serde owned by transfer, a plain []byte crosses the boundary).
-// Guarded by the download lease; the tokenless rule covers salvage-apply,
-// which claims via MarkSalvaging.
+// Guarded by the download or salvage lease.
 func (s *Store) SaveProgress(ctx context.Context, fileID int64, tok LeaseToken, blob []byte) error {
 	return execGuarded(ctx, s.db, "save progress", fileID,
 		"UPDATE files SET progress = ?, progress_ver = progress_ver + 1, updated_at = ? "+
 			"WHERE id = ? AND status IN (?, ?) AND "+leaseGuard,
 		blob, utc(time.Now()), fileID,
-		string(FileDownloading), string(FileSalvaging), string(tok), string(tok))
+		string(FileDownloading), string(FileSalvaging), string(tok))
 }
 
 // LoadProgress returns the durable checkpoint blob, nil when none was saved.
@@ -351,7 +349,7 @@ func (s *Store) ReplacePendingBlocks(ctx context.Context, fileID int64, tok Leas
 		var ok bool
 		if err := tx.QueryRowContext(ctx,
 			"SELECT EXISTS(SELECT 1 FROM files WHERE id = ? AND status = ? AND "+leaseGuard+")",
-			fileID, string(FileDownloading), string(tok), string(tok)).Scan(&ok); err != nil {
+			fileID, string(FileDownloading), string(tok)).Scan(&ok); err != nil {
 			return fmt.Errorf("store: replace pending blocks: %w", err)
 		}
 		if !ok {

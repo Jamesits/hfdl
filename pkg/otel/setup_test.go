@@ -6,6 +6,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"os"
+	"strings"
 	"sync"
 	"testing"
 
@@ -15,6 +16,42 @@ import (
 	commonv1 "go.opentelemetry.io/proto/otlp/common/v1"
 	"google.golang.org/protobuf/proto"
 )
+
+func TestTraceSampler(t *testing.T) {
+	tests := []struct {
+		name, arg, want string
+		wantErr         bool
+	}{
+		{"always_on", "", "AlwaysOnSampler", false},
+		{"always_off", "", "AlwaysOffSampler", false},
+		{"traceidratio", "0.25", "TraceIDRatioBased{0.25}", false},
+		{"parentbased_always_on", "", "ParentBased{root:AlwaysOnSampler", false},
+		{"parentbased_always_off", "", "ParentBased{root:AlwaysOffSampler", false},
+		{"parentbased_traceidratio", "0.5", "ParentBased{root:TraceIDRatioBased{0.5}", false},
+		{"unknown", "", "", true},
+		{"traceidratio", "2", "", true},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name+tc.arg, func(t *testing.T) {
+			env := func(key string) string {
+				if key == "OTEL_TRACES_SAMPLER" {
+					return tc.name
+				}
+				if key == "OTEL_TRACES_SAMPLER_ARG" {
+					return tc.arg
+				}
+				return ""
+			}
+			s, err := traceSampler(env)
+			if (err != nil) != tc.wantErr {
+				t.Fatalf("error = %v, wantErr %v", err, tc.wantErr)
+			}
+			if err == nil && !strings.Contains(s.Description(), tc.want) {
+				t.Fatalf("description = %q, want substring %q", s.Description(), tc.want)
+			}
+		})
+	}
+}
 
 // otlpFixture is a local OTLP/HTTP collector: it records decoded export
 // requests per signal path. No network is touched (httptest loopback).

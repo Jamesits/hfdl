@@ -6,6 +6,7 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"errors"
+	"log/slog"
 	"os"
 	"path/filepath"
 	"testing"
@@ -65,6 +66,10 @@ func TestResumeAfterCancel(t *testing.T) {
 	if covered <= 0 {
 		t.Fatalf("nothing checkpointed before cancel")
 	}
+	// Drain in-flight handlers before sampling: an aborted run-1 request can
+	// otherwise credit its full range to bytesOut after the sample, inflating
+	// run 2's served count.
+	waitFor(t, "hub idle after cancel", hub.idle)
 	servedBefore := hub.payloadBytes()
 
 	// New manager, same DB, no artificial delay: finishes from the blob.
@@ -85,6 +90,76 @@ func TestResumeAfterCancel(t *testing.T) {
 	// re-fetched.
 	if served2 := hub.payloadBytes() - servedBefore; served2 != int64(len(want))-covered {
 		t.Errorf("run 2 served %d bytes, want %d (size - checkpointed)", served2, int64(len(want))-covered)
+	}
+}
+
+// TestCorruptProgressSizeMismatch: a well-formed progress blob whose recorded
+// size differs from the file's size parses fine in sched but is rejected by
+// transfer (*CorruptProgressError). The manager must clear the blob and
+// requeue so the file completes — instead of reloading the same bad blob on
+// every pass and looping forever.
+func TestCorruptProgressSizeMismatch(t *testing.T) {
+	want := makeContent(1<<20, 59)
+	hub := newFixtureHub(t, map[string][]byte{"c.bin": want}, "c.bin")
+	cap := &logCapture{}
+	env := newTestEnvLog(t, hub, slog.New(cap))
+	ctx := t.Context()
+
+	if err := env.manager.Submit(ctx, Job{Repo: "org/repo"}); err != nil {
+		t.Fatalf("Submit: %v", err)
+	}
+	// Drive listing manually so the file row exists to plant the blob on.
+	repo, tok, err := env.st.LeaseMeta(ctx, time.Now())
+	if err != nil {
+		t.Fatalf("LeaseMeta: %v", err)
+	}
+	if err := env.st.SetCommitSHA(ctx, repo.ID, tok, hub.sha); err != nil {
+		t.Fatalf("SetCommitSHA: %v", err)
+	}
+	if err := env.st.CompleteListing(ctx, repo.ID, tok, []store.FileEntry{{
+		Path: "c.bin", Size: int64(len(want)),
+		SHA256: sha256HexOf(want), IsLFS: true,
+	}}); err != nil {
+		t.Fatalf("CompleteListing: %v", err)
+	}
+	// Plant a valid encoding of an empty set with recorded size 0 — internal
+	// consistency passes sched's parse; transfer rejects it against the real
+	// 1 MiB task size.
+	blob, err := (&transfer.IntervalSet{}).MarshalBinary()
+	if err != nil {
+		t.Fatalf("MarshalBinary: %v", err)
+	}
+	if _, err := env.st.DB().ExecContext(ctx,
+		"UPDATE files SET progress = ? WHERE path = 'c.bin'", blob); err != nil {
+		t.Fatal(err)
+	}
+
+	if err := env.manager.Run(ctx); err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+	if !cap.has(slog.LevelWarn, "progress blob rejected by transfer") {
+		t.Error("expected the corrupt-progress warn (transfer rejection path not taken)")
+	}
+	got, err := os.ReadFile(env.installedSnapshotPath("org/repo", "main", hub.sha, "c.bin"))
+	if err != nil {
+		t.Fatalf("read installed: %v", err)
+	}
+	if !bytes.Equal(got, want) {
+		t.Fatalf("installed content mismatch after corrupt-progress recovery")
+	}
+	var cleared []byte
+	if err := env.st.DB().QueryRowContext(ctx,
+		"SELECT progress FROM files WHERE path = 'c.bin'").Scan(&cleared); err != nil {
+		t.Fatal(err)
+	}
+	if len(cleared) > 0 {
+		var set transfer.IntervalSet
+		if err := set.UnmarshalBinary(cleared); err != nil {
+			t.Fatalf("final progress blob corrupt: %v", err)
+		}
+		if len(set.Missing(int64(len(want)))) != 0 {
+			t.Error("final progress blob does not cover the file (bad blob survived)")
+		}
 	}
 }
 
@@ -159,17 +234,16 @@ func TestRecoverStartupRequeues(t *testing.T) {
 // TestSetLimitsHot: bandwidth bucket and per-file conns update live; pause
 // suspends the download and install queues.
 func TestSetLimitsHot(t *testing.T) {
-	// 4 MiB in 256 KiB blocks = 16 blocks: a deep enough pending backlog that
-	// the four workers, once SetParallelism spawns them, overlap across several
-	// lease rounds. With only a handful of blocks a single unlucky scheduling —
-	// worker 0 draining them serially before its peers connect — can leave peak
-	// concurrency at 1 (the block-leaser serializes on SQLite, so each round's
-	// overlap window is thin under -race); many rounds make non-overlap
-	// vanishingly unlikely. The byte count stays small to bound the race
-	// detector's per-byte cost.
+	// The hub's hold gate parks the first block request mid-flight, so the
+	// hot SetLimits deterministically lands while a deep pending backlog
+	// (4 MiB in 256 KiB blocks = 16 blocks) still exists — without the gate
+	// the whole job can finish before a polled gauge even observes it. The
+	// parked request keeps its concurrency slot, so the workers spawned by
+	// SetParallelism must overlap it: maxConcurrentSamePath ≥ 2 is a
+	// certainty, not a race.
 	want := makeContent(4<<20, 43)
 	hub := newFixtureHub(t, map[string][]byte{"big.bin": want}, "big.bin")
-	hub.delay = 30 * time.Millisecond
+	started, release := hub.holdNextResolve(1)
 	env := newTestEnv(t, hub, withLimits(func(l *config.Limits) {
 		l.Conns = 1
 		l.BlockSize = 256 << 10
@@ -182,10 +256,12 @@ func TestSetLimitsHot(t *testing.T) {
 	runErr := make(chan error, 1)
 	go func() { runErr <- env.manager.Run(ctx) }()
 
-	// Wait for the download to start (one connection).
-	waitFor(t, "download started", func() bool {
-		return env.reg.Snapshot().Conns >= 1
-	})
+	// The first block request is in flight and parked on the gate.
+	select {
+	case <-started:
+	case <-time.After(30 * time.Second):
+		t.Fatal("timed out waiting for the first block request")
+	}
 
 	// Hot bandwidth change: observable on the bucket.
 	l := env.manager.currentLimits()
@@ -196,12 +272,13 @@ func TestSetLimitsHot(t *testing.T) {
 		t.Errorf("bandwidth bucket rate = %d, want 12345678 after SetLimits", got)
 	}
 
-	// Hot conns: SetParallelism grew the live worker set. Assert on the
-	// fixture's durable high-water mark of concurrent requests to the file
-	// rather than the instantaneous stats gauge: the block-leaser serializes on
-	// SQLite, so the overlap window is a thin, bursty transient a polled gauge
-	// (waitFor) routinely misses under load, whereas the latch captures the peak
-	// however brief.
+	// Hot conns: the workers SetParallelism spawned lease further blocks and
+	// hit the hub while the first request is still parked. Latch the overlap
+	// before releasing the gate, then let the run finish.
+	waitFor(t, "grown workers overlapping the parked request", func() bool {
+		return hub.maxConcurrentSamePath() >= 2
+	})
+	release()
 	if err := <-runErr; err != nil {
 		t.Fatalf("Run: %v", err)
 	}

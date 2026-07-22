@@ -110,17 +110,3 @@ func (s *IntervalSet) clone() *IntervalSet {
 	out.iv = append(out.iv, s.iv...)
 	return out
 }
-
-// equal reports whether two sets carry identical intervals (serde round-trip
-// identity in tests).
-func (s *IntervalSet) equal(o *IntervalSet) bool {
-	if len(s.iv) != len(o.iv) {
-		return false
-	}
-	for i := range s.iv {
-		if s.iv[i] != o.iv[i] {
-			return false
-		}
-	}
-	return true
-}

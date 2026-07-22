@@ -128,7 +128,10 @@ func (fd *fileDownload) executeBlock(ws *workerState, b Block, queueWait time.Du
 		if elapsed > 0 && upstream != "" {
 			fd.reportRate(upstream, float64(b.Length)/elapsed.Seconds())
 		}
-		if cerr := fd.task.Leaser.Complete(fd.detached, b); cerr != nil {
+		opCtx, opCancel := fd.detachedOp()
+		cerr := fd.task.Leaser.Complete(opCtx, b)
+		opCancel()
+		if cerr != nil {
 			fd.fail(fmt.Errorf("transfer: complete block %d: %w", b.ID, cerr))
 			span.RecordError(cerr)
 			span.SetStatus(codes.Error, cerr.Error())
@@ -147,7 +150,10 @@ func (fd *fileDownload) executeBlock(ws *workerState, b Block, queueWait time.Du
 		span.AddEvent("requeue", trace.WithAttributes(attribute.String("reason", "drain")))
 		span.SetStatus(codes.Ok, "")
 		span.End()
-		if cerr := fd.ckpt.checkpoint(fd.detached, false); cerr != nil {
+		opCtx, opCancel := fd.detachedOp()
+		cerr := fd.ckpt.checkpoint(opCtx, false)
+		opCancel()
+		if cerr != nil {
 			fd.fail(cerr)
 		}
 
@@ -185,7 +191,10 @@ func (fd *fileDownload) handleOpenError(ws *workerState, b Block, attempt int, e
 		span.AddEvent("416")
 		if fd.intervals.coversAll(fd.task.Size) {
 			// Benign: the file is already complete per size + IntervalSet.
-			if cerr := fd.task.Leaser.Complete(fd.detached, b); cerr != nil {
+			opCtx, opCancel := fd.detachedOp()
+			cerr := fd.task.Leaser.Complete(opCtx, b)
+			opCancel()
+			if cerr != nil {
 				fd.fail(fmt.Errorf("transfer: complete block %d: %w", b.ID, cerr))
 			}
 			span.SetStatus(codes.Ok, "")
@@ -256,7 +265,10 @@ func (fd *fileDownload) handleStreamError(ws *workerState, b Block, attempt int,
 		fd.requeue(b, 0, errDrain)
 		span.AddEvent("requeue", trace.WithAttributes(attribute.String("reason", "drain")))
 		span.SetStatus(codes.Ok, "")
-		if cerr := fd.ckpt.checkpoint(fd.detached, false); cerr != nil {
+		opCtx, opCancel := fd.detachedOp()
+		cerr := fd.ckpt.checkpoint(opCtx, false)
+		opCancel()
+		if cerr != nil {
 			fd.fail(cerr)
 		}
 		return
@@ -303,7 +315,10 @@ func (fd *fileDownload) retryBlock(b Block, attempt int, cause error, span trace
 // requeue hands a block back to the leaser (detached ctx: the store must
 // hear about it even during shutdown) and emits EventRequeued.
 func (fd *fileDownload) requeue(b Block, backoff time.Duration, cause error) {
-	if err := fd.task.Leaser.Requeue(fd.detached, b, backoff, cause); err != nil {
+	opCtx, opCancel := fd.detachedOp()
+	err := fd.task.Leaser.Requeue(opCtx, b, backoff, cause)
+	opCancel()
+	if err != nil {
 		fd.log.Warn("requeue failed", "file_id", fd.task.FileID, "block_id", b.ID, "err", err)
 	}
 	fd.d.emit(fd.detached, Event{FileID: fd.task.FileID, BlockID: b.ID, Kind: EventRequeued, Err: cause})
@@ -663,14 +678,14 @@ func (fd *fileDownload) fallbackStream(ctx context.Context) (string, int64, erro
 
 	attemptCtx, cancel := context.WithCancel(ctx)
 	defer cancel()
-	conn := fd.stall.connStart(cancel)
-	defer fd.stall.connEnd(conn)
 
 	body, err := fd.openFallback(attemptCtx)
 	if err != nil {
 		return "", 0, err
 	}
 	defer body.Close()
+	conn := fd.stall.connStart(cancel)
+	defer fd.stall.connEnd(conn)
 	upstream := upstreamOf(body)
 	st.ConnStart(fd.task.FileID, upstream)
 	defer st.ConnEnd(fd.task.FileID, upstream)

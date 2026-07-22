@@ -18,6 +18,7 @@ import (
 const (
 	ioctlStorageQueryProperty        = 0x002D1400
 	storageDeviceSeekPenaltyProperty = 7 // STORAGE_PROPERTY_ID
+	storageAccessAlignmentProperty   = 6 // STORAGE_PROPERTY_ID
 	propertyStandardQuery            = 0 // STORAGE_QUERY_TYPE
 	winMaxPath                       = 260
 )
@@ -33,6 +34,51 @@ type deviceSeekPenaltyDescriptor struct {
 	Size              uint32
 	IncursSeekPenalty uint8 // BOOLEAN
 	_                 [3]uint8
+}
+
+type storageAccessAlignmentDescriptor struct {
+	Version                       uint32
+	Size                          uint32
+	BytesPerCacheLine             uint32
+	BytesOffsetForCacheAlignment  uint32
+	BytesPerLogicalSector         uint32
+	BytesPerPhysicalSector        uint32
+	BytesOffsetForSectorAlignment uint32
+}
+
+// volumeDirectAlignment returns the physical-sector constraint reported by
+// the storage stack. The 4KiB floor preserves pool-slab alignment on devices
+// whose logical or physical sectors are smaller.
+func volumeDirectAlignment(path string) int64 {
+	root, err := volumeRoot(path)
+	if err != nil || len(root) < 2 || root[1] != ':' {
+		return slabAlign
+	}
+	devp, err := windows.UTF16PtrFromString(`\\.\` + root[:2])
+	if err != nil {
+		return slabAlign
+	}
+	h, err := windows.CreateFile(devp, 0, windows.FILE_SHARE_READ|windows.FILE_SHARE_WRITE, nil, windows.OPEN_EXISTING, 0, 0)
+	if err != nil {
+		return slabAlign
+	}
+	defer windows.CloseHandle(h) //nolint:errcheck // query handle
+	q := storagePropertyQuery{PropertyID: storageAccessAlignmentProperty, QueryType: propertyStandardQuery}
+	var desc storageAccessAlignmentDescriptor
+	var n uint32
+	if err := windows.DeviceIoControl(h, ioctlStorageQueryProperty,
+		(*byte)(unsafe.Pointer(&q)), uint32(unsafe.Sizeof(q)),
+		(*byte)(unsafe.Pointer(&desc)), uint32(unsafe.Sizeof(desc)), &n, nil); err != nil || n == 0 {
+		return slabAlign
+	}
+	align := int64(desc.BytesPerPhysicalSector)
+	if logical := int64(desc.BytesPerLogicalSector); logical > align {
+		align = logical
+	}
+	if align < slabAlign {
+		align = slabAlign
+	}
+	return align
 }
 
 // ProbeFs classifies the volume behind path: network drives (GetDriveType ==

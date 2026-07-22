@@ -10,6 +10,33 @@ const (
 	testFloor  = 1000
 )
 
+func (m *stallMonitor) armedState() (bool, bool) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	return m.armed, m.anyAboveFloorLocked()
+}
+
+func (m *stallMonitor) driveConn(start time.Time) *connTrack {
+	c := &connTrack{
+		mon:         m,
+		start:       start,
+		windowStart: start,
+		lastFloor:   start,
+		cancel:      func() {},
+		stop:        make(chan struct{}),
+		done:        make(chan struct{}),
+	}
+	close(c.done)
+	m.mu.Lock()
+	m.conns[c] = struct{}{}
+	m.mu.Unlock()
+	return c
+}
+
+func (m *stallMonitor) driveSweep(now time.Time) {
+	m.sweep(now)
+}
+
 // TestStallNeverArmed: a connection that never meets the floor while the file
 // was never armed is never soft-killed (a slow network — only layers 2/3
 // apply), and a steady below-floor-but-progressing conn also survives the hard

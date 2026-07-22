@@ -6,8 +6,8 @@ import (
 )
 
 // VolumeID identifies a whole physical device (spindle). On Linux it is the
-// whole disk's dev "major:minor" resolved from st_dev via /sys/dev/block, so
-// two partitions of one disk share an id.
+// leaf disk IDs resolved from st_dev via sysfs, so partitions and stacked
+// devices with the same sorted set of physical disks share an id.
 type VolumeID string
 
 // VolumeSet is the FastCopy driveMng.OccupancyDrives analog:

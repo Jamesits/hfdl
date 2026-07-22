@@ -11,7 +11,8 @@ import (
 	"time"
 )
 
-// checkNotBusy fails the test if err is a SQLITE_BUSY* leak to a caller.
+// checkNotBusy fails the test for every unexpected error, distinguishing busy
+// leaks in its diagnostic.
 func checkNotBusy(t *testing.T, err error) {
 	t.Helper()
 	if err == nil {
@@ -19,7 +20,9 @@ func checkNotBusy(t *testing.T, err error) {
 	}
 	if isBusyErr(err) || strings.Contains(err.Error(), "database is locked") {
 		t.Errorf("SQLITE_BUSY escaped to caller: %v", err)
+		return
 	}
+	t.Errorf("unexpected store error: %v", err)
 }
 
 // TestBusyRetryAbsorbsSnapshot deterministically produces
@@ -151,7 +154,7 @@ func TestBusySnapshotContention(t *testing.T) {
 				case err == nil:
 					transitioned.Store(true)
 					return
-				case errors.Is(err, ErrLiveBlockLeases), errors.Is(err, ErrFenced):
+				case errors.Is(err, ErrLiveBlockLeases), errors.Is(err, ErrBlocksPending), errors.Is(err, ErrFenced):
 					time.Sleep(time.Millisecond)
 				default:
 					checkNotBusy(t, err)
@@ -207,11 +210,8 @@ func TestBusySnapshotContention(t *testing.T) {
 			}
 		}(w)
 	}
-	for i := 0; i < 20; i++ {
-		if err := s.FailVerify(ctx, fileID, vtok, errors.New("hash mismatch")); err != nil {
-			checkNotBusy(t, err)
-			break // first call wins; the file left verifying
-		}
+	if err := s.FailVerify(ctx, fileID, vtok, errors.New("hash mismatch")); err != nil {
+		checkNotBusy(t, err)
 	}
 	stop.Store(true)
 	wg.Wait()

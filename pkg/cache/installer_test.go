@@ -342,13 +342,11 @@ func TestInstallLocalDirReflinkSuccess(t *testing.T) {
 		copied.Store(true)
 		return errors.New("copy must not run")
 	}
-	in.reflinkFn = func(src, dst string) error {
-		data, err := os.ReadFile(src)
-		if err != nil {
-			return err
-		}
-		return os.WriteFile(dst, data, 0o644)
+	probe := filepath.Join(t.TempDir(), "probe")
+	if err := reflinkFile(in.s.BlobPath(testBlobID), probe); err != nil {
+		t.Skipf("filesystem does not support reflink: %v", err)
 	}
+	_ = os.Remove(probe)
 	destDir := t.TempDir()
 	final, err := in.Install(t.Context(), localRequest(destDir, "f.bin"))
 	if err != nil {

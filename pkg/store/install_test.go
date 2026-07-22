@@ -99,7 +99,10 @@ func TestLeaseInstallAndJobCompletion(t *testing.T) {
 	if jobSt != string(JobDone) {
 		t.Errorf("job status = %s, want done after all job_files done", jobSt)
 	}
-	done, total, _ = s.JobProgress(ctx, jobID)
+	done, total, err = s.JobProgress(ctx, jobID)
+	if err != nil {
+		t.Fatalf("JobProgress final: %v", err)
+	}
 	if done != 2 || total != 2 {
 		t.Errorf("JobProgress = (%d, %d), want (2, 2)", done, total)
 	}

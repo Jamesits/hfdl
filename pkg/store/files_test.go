@@ -67,7 +67,10 @@ func TestVerifyLifecycle(t *testing.T) {
 	repoID, _ := seedListedRepo(t, s, "org/repo", []FileEntry{{Path: "a", Size: 100, GitOID: "g"}})
 	fileID := mustFileID(t, s, repoID, "a")
 	tok := leaseFile(t, s, fileID, 1)
-	leased, _ := s.LeaseBlocks(ctx, 1, BlockFilter{FileIDs: []int64{fileID}}, time.Now())
+	leased, err := s.LeaseBlocks(ctx, 1, BlockFilter{FileIDs: []int64{fileID}}, time.Now())
+	if err != nil || len(leased) != 1 {
+		t.Fatalf("LeaseBlocks: %v (%d)", err, len(leased))
+	}
 	if _, err := s.CompleteBlock(ctx, leased[0].ID, leased[0].Token); err != nil {
 		t.Fatal(err)
 	}
@@ -117,7 +120,10 @@ func TestFailVerifyResetThenError(t *testing.T) {
 		if err := s.SaveProgress(ctx, fileID, tok, []byte{0xDE, 0xAD}); err != nil {
 			t.Fatal(err)
 		}
-		leased, _ := s.LeaseBlocks(ctx, 1, BlockFilter{FileIDs: []int64{fileID}}, time.Now())
+		leased, err := s.LeaseBlocks(ctx, 1, BlockFilter{FileIDs: []int64{fileID}}, time.Now())
+		if err != nil || len(leased) != 1 {
+			t.Fatalf("LeaseBlocks: %v (%d)", err, len(leased))
+		}
 		if _, err := s.CompleteBlock(ctx, leased[0].ID, leased[0].Token); err != nil {
 			t.Fatal(err)
 		}
@@ -199,7 +205,10 @@ func TestSaveLoadProgress(t *testing.T) {
 	if err := s.SaveProgress(ctx, fileID, "01JWRONGTOKEN000000000000", []byte{9}); !errors.Is(err, ErrFenced) {
 		t.Fatalf("SaveProgress wrong token err = %v, want ErrFenced", err)
 	}
-	blob, _ = s.LoadProgress(ctx, fileID)
+	blob, err = s.LoadProgress(ctx, fileID)
+	if err != nil {
+		t.Fatalf("LoadProgress after fenced save: %v", err)
+	}
 	if !bytes.Equal(blob, want) {
 		t.Errorf("blob changed by fenced write: %v", blob)
 	}
@@ -255,7 +264,10 @@ func TestReplacePendingBlocks(t *testing.T) {
 	tok := leaseFile(t, s, fileID, 2)
 
 	// One block done: re-chunking keeps it, replaces only pending.
-	leased, _ := s.LeaseBlocks(ctx, 1, BlockFilter{FileIDs: []int64{fileID}}, time.Now())
+	leased, err := s.LeaseBlocks(ctx, 1, BlockFilter{FileIDs: []int64{fileID}}, time.Now())
+	if err != nil || len(leased) != 1 {
+		t.Fatalf("LeaseBlocks: %v (%d)", err, len(leased))
+	}
 	if _, err := s.CompleteBlock(ctx, leased[0].ID, leased[0].Token); err != nil {
 		t.Fatal(err)
 	}
@@ -313,13 +325,21 @@ func TestMarkSalvagingTokenlessFlow(t *testing.T) {
 		t.Fatalf("second MarkSalvaging err = %v, want ErrFenced", err)
 	}
 
-	// Salvage-apply: tokenless progress save, then re-enter the machine at
-	// downloaded so the verifier still hashes the copied bytes.
-	if err := s.SaveProgress(ctx, lfsID, "", []byte{0xFF}); err != nil {
-		t.Fatalf("tokenless SaveProgress on salvaging: %v", err)
+	if err := s.SaveProgress(ctx, lfsID, "", []byte{0xFF}); !errors.Is(err, ErrFenced) {
+		t.Fatalf("tokenless SaveProgress err = %v, want ErrFenced", err)
 	}
-	if err := s.TransitionFile(ctx, lfsID, "", FileSalvaging, FileDownloaded, nil); err != nil {
-		t.Fatalf("salvaging→downloaded: %v", err)
+	if err := s.TransitionFile(ctx, lfsID, "", FileSalvaging, FileDownloaded, nil); !errors.Is(err, ErrTokenlessEdge) {
+		t.Fatalf("tokenless salvaging→downloaded err = %v, want ErrTokenlessEdge", err)
+	}
+	f, tok, err := s.LeaseSalvage(ctx, time.Now())
+	if err != nil || f.ID != lfsID {
+		t.Fatalf("LeaseSalvage = (%v, %v)", f, err)
+	}
+	if err := s.SaveProgress(ctx, lfsID, tok, []byte{0xFF}); err != nil {
+		t.Fatalf("SaveProgress with salvage lease: %v", err)
+	}
+	if err := s.TransitionFile(ctx, lfsID, tok, FileSalvaging, FileDownloaded, nil); err != nil {
+		t.Fatalf("leased salvaging→downloaded: %v", err)
 	}
 	if _, _, err := s.LeaseVerify(ctx, time.Now()); err != nil {
 		t.Fatalf("salvaged file must be verifiable: %v", err)

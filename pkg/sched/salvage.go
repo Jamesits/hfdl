@@ -111,7 +111,12 @@ func (m *Manager) statReference(ctx context.Context, path string, j Job) (store.
 		m.log.Debug("reference path rejected (inside cache/destination)", "path", resolved)
 		return store.ReferenceFile{}, false
 	}
-	dev, ino := devIno(resolved, info)
+	dev, ino, identityErr := devIno(resolved, info)
+	if identityErr != nil {
+		m.identityUnsupportedOnce.Do(func() {
+			m.log.Warn("filesystem identity unavailable; reference invalidation uses size and mtime only", "err", identityErr)
+		})
+	}
 	return store.ReferenceFile{
 		Path:    resolved,
 		Size:    info.Size(),
@@ -125,16 +130,16 @@ func (m *Manager) statReference(ctx context.Context, path string, j Job) (store.
 // active job destination (the current job's own destination counts — a file
 // must never salvage from its own possibly-partial output).
 func (m *Manager) pathForbidden(resolved string, j Job) bool {
-	if insideDir(resolved, m.cfg.Cache.Root()) {
+	if insideDir(resolved, resolveExistingAncestor(m.cfg.Cache.Root())) {
 		return true
 	}
 	// The submitting job's destination.
-	if dest := jobDestRoot(j); dest != "" && insideDir(resolved, dest) {
+	if dest := jobDestRoot(j); dest != "" && insideDir(resolved, resolveExistingAncestor(dest)) {
 		return true
 	}
 	// Other active jobs' destinations.
 	for _, root := range m.activeDestRoots() {
-		if insideDir(resolved, root) {
+		if insideDir(resolved, resolveExistingAncestor(root)) {
 			return true
 		}
 	}
@@ -151,13 +156,29 @@ func jobDestRoot(j Job) string {
 	if err != nil {
 		return ""
 	}
-	if r, err := filepath.EvalSymlinks(abs); err == nil {
-		abs = r
-	}
 	if j.DestMode == store.DestModeLocalDir {
 		return abs
 	}
 	return filepath.Join(abs, cache.ModelDirName(string(j.RepoType), j.Repo))
+}
+
+// resolveExistingAncestor resolves symlinks in the deepest existing prefix,
+// preserving not-yet-created destination components beneath that identity.
+func resolveExistingAncestor(path string) string {
+	cur := filepath.Clean(path)
+	var tail []string
+	for {
+		if resolved, err := filepath.EvalSymlinks(cur); err == nil {
+			parts := append([]string{resolved}, tail...)
+			return filepath.Join(parts...)
+		}
+		parent := filepath.Dir(cur)
+		if parent == cur {
+			return path
+		}
+		tail = append([]string{filepath.Base(cur)}, tail...)
+		cur = parent
+	}
 }
 
 // activeDestRoots tracks destinations of all submitted jobs (registered at

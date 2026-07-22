@@ -9,6 +9,18 @@ import (
 	"testing"
 )
 
+func (s *IntervalSet) equal(o *IntervalSet) bool {
+	if len(s.iv) != len(o.iv) {
+		return false
+	}
+	for i := range s.iv {
+		if s.iv[i] != o.iv[i] {
+			return false
+		}
+	}
+	return true
+}
+
 func TestIntervalSetAddCoalesce(t *testing.T) {
 	cases := []struct {
 		name string

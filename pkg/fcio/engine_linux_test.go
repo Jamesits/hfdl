@@ -7,7 +7,9 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"math/rand/v2"
+	"os"
 	"path/filepath"
 	"reflect"
 	"sync"
@@ -18,8 +20,10 @@ import (
 
 // fakeCaps is an in-memory CapsCache.
 type fakeCaps struct {
-	mu sync.Mutex
-	m  map[string][]byte
+	mu   sync.Mutex
+	m    map[string][]byte
+	gets int
+	puts int
 }
 
 func newFakeCaps() *fakeCaps { return &fakeCaps{m: map[string][]byte{}} }
@@ -27,12 +31,14 @@ func newFakeCaps() *fakeCaps { return &fakeCaps{m: map[string][]byte{}} }
 func (c *fakeCaps) GetCaps(_ context.Context, key string) ([]byte, error) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
+	c.gets++
 	return c.m[key], nil
 }
 
 func (c *fakeCaps) PutCaps(_ context.Context, key string, caps []byte) error {
 	c.mu.Lock()
 	defer c.mu.Unlock()
+	c.puts++
 	c.m[key] = append([]byte{}, caps...)
 	return nil
 }
@@ -44,11 +50,36 @@ func (c *fakeCaps) get(key string) []byte {
 }
 
 func TestProbeFsRoot(t *testing.T) {
-	fs, err := ProbeFs(t.Context(), "/")
-	if err != nil {
-		t.Fatalf("ProbeFs(/): %v", err)
+	dir := t.TempDir()
+	var st unix.Stat_t
+	if err := unix.Stat(dir, &st); err != nil {
+		t.Fatal(err)
 	}
-	t.Logf("/ media class: %s", fs)
+	root := t.TempDir()
+	oldRoot := sysfsRoot
+	sysfsRoot = root
+	t.Cleanup(func() { sysfsRoot = oldRoot })
+	device := filepath.Join(root, "devices", "virtual-test")
+	if err := os.MkdirAll(filepath.Join(device, "queue"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(device, "queue", "rotational"), []byte("0\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	link := filepath.Join(root, "dev", "block", fmt.Sprintf("%d:%d", unix.Major(st.Dev), unix.Minor(st.Dev)))
+	if err := os.MkdirAll(filepath.Dir(link), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(device, link); err != nil {
+		t.Fatal(err)
+	}
+	fs, err := ProbeFs(t.Context(), dir)
+	if err != nil {
+		t.Fatalf("ProbeFs: %v", err)
+	}
+	if fs != FsSSD {
+		t.Fatalf("media class = %s, want ssd", fs)
+	}
 }
 
 func TestVolumeOf(t *testing.T) {
@@ -163,6 +194,47 @@ func TestDirectDowngradeViaCapsCache(t *testing.T) {
 	}
 }
 
+func TestDirectPerFileRejectionDowngradesVolume(t *testing.T) {
+	if _, err := os.Stat("/dev/shm"); err != nil {
+		t.Skipf("/dev/shm unavailable: %v", err)
+	}
+	dir, err := os.MkdirTemp("/dev/shm", "hfdl-direct-test-")
+	if err != nil {
+		t.Skipf("cannot create under /dev/shm: %v", err)
+	}
+	t.Cleanup(func() {
+		if err := os.RemoveAll(dir); err != nil {
+			t.Errorf("remove temp directory: %v", err)
+		}
+	})
+	dev, err := statVolumeID(dir)
+	if err != nil {
+		t.Fatalf("statVolumeID: %v", err)
+	}
+	caps := newFakeCaps()
+	key := "volcaps:" + string(dev)
+	caps.m[key] = []byte(`{"direct_ok":true,"align":4096}`)
+	eng := NewEngine(testLogger(), caps, TierDirect)
+	f, err := eng.Open(t.Context(), filepath.Join(dir, "f.bin"), -1, Hints{})
+	if err != nil {
+		t.Fatalf("per-file O_DIRECT rejection must downgrade without error: %v", err)
+	}
+	defer f.Close()
+	if f.tier == tierDirect {
+		t.Skip("/dev/shm unexpectedly supports O_DIRECT")
+	}
+	if f.tier != tierFadvise || f.df != nil {
+		t.Fatalf("file did not downgrade: tier=%s direct-fd=%v", f.tier, f.df != nil)
+	}
+	var cached volCaps
+	if err := json.Unmarshal(caps.get(key), &cached); err != nil {
+		t.Fatalf("decode downgraded caps: %v", err)
+	}
+	if cached.DirectOK || cached.Align != 4096 {
+		t.Fatalf("downgraded caps = %+v", cached)
+	}
+}
+
 func TestDirectProbeCachesDecision(t *testing.T) {
 	dir := t.TempDir()
 	dev, err := statVolumeID(dir)
@@ -187,7 +259,20 @@ func TestDirectProbeCachesDecision(t *testing.T) {
 	if c.Align <= 0 {
 		t.Fatalf("cached align = %d", c.Align)
 	}
-	t.Logf("probe: direct=%v align=%d tier=%s", c.DirectOK, c.Align, f.tier)
+	second := NewEngine(testLogger(), caps, TierDirect)
+	c2, err := second.volumeCaps(t.Context(), filepath.Join(dir, "second.bin"))
+	if err != nil {
+		t.Fatalf("cached volumeCaps: %v", err)
+	}
+	if *c2 != c {
+		t.Fatalf("round-trip caps = %+v, want %+v", *c2, c)
+	}
+	caps.mu.Lock()
+	gets, puts := caps.gets, caps.puts
+	caps.mu.Unlock()
+	if gets != 2 || puts != 1 {
+		t.Fatalf("cache calls after second lookup: gets=%d puts=%d, want 2/1", gets, puts)
+	}
 }
 
 // TestDirectTierMixedWrites exercises the aligned-interior plus

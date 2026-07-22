@@ -9,6 +9,8 @@ import (
 	"strings"
 	"sync"
 	"time"
+
+	"github.com/jamesits/hfdl/pkg/fcio"
 )
 
 // chunkCache is the on-disk xorb chunk cache. Keys are
@@ -26,12 +28,10 @@ import (
 // decode work, and the lock makes eviction-vs-read races impossible within a
 // process.
 //
-// TODO(cross-platform): the in-process mutex does NOT coordinate with other
-// processes (e.g. a concurrent hf_xet) sharing this dir — hf_xet uses a
-// per-file lock which is not replicated here. Likewise Put's os.Rename onto an
-// existing entry replaces content atomically on POSIX but on Windows can fail
-// or leave stale content when the destination exists. Both are deferred to the
-// cross-platform pass.
+// The in-process mutex does NOT coordinate with other processes sharing this
+// dir. Adds are crash-safe (unique temporary file plus atomic replacement);
+// concurrent processes can at worst double-evict, which is benign for this
+// best-effort cache.
 //
 // The cache is best-effort: any IO inconsistency degrades to a miss (or a
 // dropped put), never to a failed download.
@@ -197,10 +197,7 @@ func (c *chunkCache) Put(key cacheKey, data []byte) {
 		_ = os.Remove(tmpName)
 		return
 	}
-	// TODO(cross-platform): on Windows os.Rename onto an existing p can fail
-	// or keep stale content; a MoveFileEx/ReplaceFile-style replace is needed
-	// there (see the package-level note).
-	if err := os.Rename(tmpName, p); err != nil {
+	if err := fcio.ReplaceFile(tmpName, p); err != nil {
 		_ = os.Remove(tmpName)
 		return
 	}
@@ -249,11 +246,4 @@ func (c *chunkCache) reapPendingLocked() {
 			c.total -= e.size
 		}
 	}
-}
-
-// stats reports (entries, totalBytes); used by tests.
-func (c *chunkCache) stats() (int, int64) {
-	c.mu.Lock()
-	defer c.mu.Unlock()
-	return len(c.entries), c.total
 }

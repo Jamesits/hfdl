@@ -3,6 +3,7 @@ package tui
 import (
 	"context"
 	"io"
+	"log/slog"
 	"os"
 	"testing"
 	"time"
@@ -84,7 +85,18 @@ func TestRunZeroStdWrites(t *testing.T) {
 	os.Stdout, os.Stderr = wOut, wErr
 	defer func() { os.Stdout, os.Stderr = oldOut, oldErr }()
 
-	keys, errCh := startProgram(t, t.Context(), logging.NewRing(16))
+	ring := logging.NewRing(16)
+	handler := logging.NewHandler(slog.LevelDebug, nil, ring)
+	t.Cleanup(func() { _ = handler.Close(t.Context()) })
+	log := slog.New(handler)
+	keys, errCh := startProgram(t, t.Context(), ring)
+	logsDone := make(chan struct{})
+	go func() {
+		defer close(logsDone)
+		for i := 0; i < 100; i++ {
+			log.Info("concurrent TUI log", "record", i)
+		}
+	}()
 	time.Sleep(400 * time.Millisecond)
 	keys <- "p" // exercise a callback path mid-run
 	time.Sleep(100 * time.Millisecond)
@@ -92,6 +104,7 @@ func TestRunZeroStdWrites(t *testing.T) {
 	if err := <-errCh; err != nil {
 		t.Fatalf("run: %v", err)
 	}
+	<-logsDone
 
 	if err := wOut.Close(); err != nil {
 		t.Errorf("close stdout pipe: %v", err)

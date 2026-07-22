@@ -6,11 +6,11 @@ import (
 	"log/slog"
 	"os"
 	"path/filepath"
-	"strings"
 	"time"
 
 	"github.com/spf13/cobra"
 
+	"github.com/jamesits/hfdl/pkg/cache"
 	"github.com/jamesits/hfdl/pkg/config"
 	"github.com/jamesits/hfdl/pkg/hfapi"
 )
@@ -360,7 +360,7 @@ func finalPath(p *downloadPlan, snap *schedSnapshot) string {
 		}
 		return p.cli.LocalDir
 	}
-	repoDir := filepath.Join(p.cacheDir, snapshotDirName(p.ref.RepoType, p.ref.Repo))
+	repoDir := filepath.Join(p.cacheDir, cache.ModelDirName(string(p.ref.RepoType), p.ref.Repo))
 	sha := p.ref.Revision
 	if snap != nil && snap.CommitSHA != "" {
 		sha = snap.CommitSHA
@@ -370,17 +370,4 @@ func finalPath(p *downloadPlan, snap *schedSnapshot) string {
 		return filepath.Join(snapDir, p.cli.Filenames[0])
 	}
 	return snapDir
-}
-
-// snapshotDirName mirrors cache.Installer's HF-cache layout:
-// models--org--name (and datasets--/spaces--).
-func snapshotDirName(rt hfapi.RepoType, repo string) string {
-	plural := "models"
-	switch rt {
-	case hfapi.RepoTypeDataset:
-		plural = "datasets"
-	case hfapi.RepoTypeSpace:
-		plural = "spaces"
-	}
-	return plural + "--" + strings.ReplaceAll(repo, "/", "--")
 }

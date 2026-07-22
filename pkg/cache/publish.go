@@ -22,9 +22,9 @@ func (e *BlobConflictError) Error() string {
 }
 
 // Publish atomically moves the verified staging file of fileID to
-// blobs/<blobID>. link(2) is the atomic no-replace rename on one filesystem:
+// blobs/<blobID>. link(2) atomically creates a second name without replacing:
 // the blob either appears whole at its final path or the call fails with
-// EEXIST, which is tolerated — losing a publication race against identical
+// EEXIST; unlinking the staging name is a separate operation. Losing a race against identical
 // content-addressed bytes is harmless. Same-size ⇒ same-content is safe here
 // because blobs are content-addressed and only published post-verify (that
 // invariant is owned upstream, not re-checked here); a size mismatch is real
@@ -46,6 +46,9 @@ func (s *Store) Publish(ctx context.Context, fileID int64, blobID string) (strin
 		if derr != nil {
 			return "", fmt.Errorf("cache: stat published blob %s: %w", dst, derr)
 		}
+		// Blob names are content hashes, so equal size for the same hash is
+		// corroboration rather than a byte comparison. Verification re-hashes
+		// staged bytes and would catch a real mismatch before publication.
 		// A failed Stat(src) is fatal: without the staging size we cannot
 		// clear the size-conflict check, so silently dropping through would
 		// mask a corrupt publication. Surface it.
@@ -59,6 +62,9 @@ func (s *Store) Publish(ctx context.Context, fileID int64, blobID string) (strin
 		if err := os.Remove(src); err != nil && !errors.Is(err, os.ErrNotExist) {
 			return "", fmt.Errorf("cache: drop duplicate %s: %w", src, err)
 		}
+		if err := s.fsyncDirFn(filepath.Dir(src)); err != nil {
+			return "", err
+		}
 		// The race loser still fsyncs the parent dir: the winner's link may
 		// not be durable yet, and a second fsync is cheap and idempotent.
 		if err := s.fsyncDirFn(filepath.Dir(dst)); err != nil {
@@ -68,6 +74,9 @@ func (s *Store) Publish(ctx context.Context, fileID int64, blobID string) (strin
 	}
 	if err := os.Remove(src); err != nil {
 		return "", fmt.Errorf("cache: unlink published %s: %w", src, err)
+	}
+	if err := s.fsyncDirFn(filepath.Dir(src)); err != nil {
+		return "", err
 	}
 	if err := s.fsyncDirFn(filepath.Dir(dst)); err != nil {
 		return "", err

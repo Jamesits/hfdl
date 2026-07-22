@@ -41,8 +41,9 @@ func (s *Store) LeaseBlocks(ctx context.Context, n int, f BlockFilter, now time.
 		return nil, nil
 	}
 
-	sel := "SELECT id, file_id FROM blocks WHERE status = ? AND (available_at IS NULL OR available_at <= ?)"
-	args := []any{string(BlockPending), utc(now)}
+	sel := "SELECT id, file_id FROM blocks WHERE status = ? AND (available_at IS NULL OR available_at <= ?) " +
+		"AND EXISTS (SELECT 1 FROM files WHERE files.id = blocks.file_id AND files.status = ?)"
+	args := []any{string(BlockPending), utc(now), string(FileDownloading)}
 	if len(f.FileIDs) > 0 {
 		sel += " AND file_id IN (" + strings.TrimSuffix(strings.Repeat("?,", len(f.FileIDs)), ",") + ")"
 		for _, id := range f.FileIDs {
@@ -86,9 +87,9 @@ func (s *Store) LeaseBlocks(ctx context.Context, n int, f BlockFilter, now time.
 		b := new(Block)
 		err := s.db.NewRaw(
 			"UPDATE blocks SET status = ?, lease_owner = ?, lease_token = ?, lease_until = ?, updated_at = ? "+
-				"WHERE id = ? AND status = ? RETURNING *",
+				"WHERE id = ? AND status = ? AND EXISTS (SELECT 1 FROM files WHERE files.id = blocks.file_id AND files.status = ?) RETURNING *",
 			string(BlockActive), s.owner, string(tok), utc(now.Add(leaseDuration)), utc(now),
-			c.id, string(BlockPending)).Scan(ctx, b)
+			c.id, string(BlockPending), string(FileDownloading)).Scan(ctx, b)
 		if errors.Is(err, sql.ErrNoRows) {
 			continue // raced out from under us; take the next candidate
 		}

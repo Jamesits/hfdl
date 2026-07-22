@@ -75,7 +75,11 @@ func hfHome(getenv func(string) string) string {
 // Endpoints resolves repeatable --endpoint → HF_ENDPOINT → DefaultEndpoint.
 func Endpoints(flag []string, getenv func(string) string) []string {
 	if len(flag) > 0 {
-		return flag
+		out := make([]string, len(flag))
+		for i, endpoint := range flag {
+			out[i] = strings.TrimRight(endpoint, "/")
+		}
+		return out
 	}
 	if v := getenv("HF_ENDPOINT"); v != "" {
 		return []string{strings.TrimRight(v, "/")}

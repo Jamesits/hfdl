@@ -119,9 +119,8 @@ func (b *Bucket) Wait(ctx context.Context, n int64) error {
 		if err := ctx.Err(); err != nil {
 			return err
 		}
-		rate := b.rate.Load()
-
 		b.mu.Lock()
+		rate := b.rate.Load()
 		now := b.clock.Now()
 		if rate == 0 { // unlimited: never blocks
 			b.ring.Add(now, 0, remaining)

@@ -16,10 +16,11 @@
 //   - plain (TierPlain): buffered IO without fadvise, for exotic netfs that
 //     rejects even advice.
 //
-// Linux is the fully implemented target. windows/darwin compile against the
-// same exported API with plain buffered semantics: tier probes report the
-// plain tier, Fallocate degrades to ftruncate, DataExtents reports the whole
-// file, DontNeed is a no-op and ProbeFs reports FsUnknown.
+// Windows uses sparse-file FSCTLs, allocated-range queries, no-buffering IO,
+// and volume identity/media probes. macOS uses F_NOCACHE/F_RDAHEAD,
+// F_PREALLOCATE, extent queries, and volume identity. Only the generic GOOS
+// fallback degrades to buffered IO, unknown filesystem classification, and
+// whole-file extent reporting.
 //
 // fcio never imports store: CapsCache is defined here and satisfied
 // structurally by the store package; cmd wires the two together.

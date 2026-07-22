@@ -57,10 +57,7 @@ func TestSafeJoin(t *testing.T) {
 	}
 }
 
-// SafeJoin (pointer-install mode) permits a leaf that is a symlink escaping
-// root: huggingface_hub snapshot entries are relative symlinks into blobs/
-// (a sibling of snapshots/) that hfdl creates and replaces without following.
-func TestSafeJoinPointerLeafSymlinkAllowed(t *testing.T) {
+func TestSafeJoinLeafSymlinkEscapeRejected(t *testing.T) {
 	root := t.TempDir()
 	outside := filepath.Join(t.TempDir(), "target")
 	if err := os.WriteFile(outside, []byte("x"), 0o644); err != nil {
@@ -69,8 +66,9 @@ func TestSafeJoinPointerLeafSymlinkAllowed(t *testing.T) {
 	if err := os.Symlink(outside, filepath.Join(root, "leaf")); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := SafeJoin(root, "leaf"); err != nil {
-		t.Fatalf("SafeJoin pointer(leaf symlink): %v", err)
+	var safety *PathSafetyError
+	if _, err := SafeJoin(root, "leaf"); !errors.As(err, &safety) {
+		t.Fatalf("SafeJoin(escaping leaf symlink) err = %v, want PathSafetyError", err)
 	}
 }
 

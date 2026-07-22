@@ -8,6 +8,7 @@ import (
 	"net/http"
 	"sort"
 
+	"github.com/jamesits/hfdl/pkg/hfapi"
 	"github.com/jamesits/hfdl/pkg/logging"
 	"go.opentelemetry.io/otel/attribute"
 	"go.opentelemetry.io/otel/codes"
@@ -87,13 +88,11 @@ type reconTerm struct {
 }
 
 // reconstruction is the normalized (version-agnostic) form of both
-// responses. baseFileOffset is 0 for full-file reconstructions; for partial
-// (Range) queries the first term's decoded output starts
-// offsetIntoFirstRange bytes before baseFileOffset's logical position
+// responses. For partial (Range) queries the first term's decoded output starts
+// offsetIntoFirstRange bytes before the requested base's logical position
 // (cas_types/mod.rs: "the location of [range start] into the first range").
 type reconstruction struct {
 	version              int // 1 or 2
-	baseFileOffset       int64
 	offsetIntoFirstRange int64
 	terms                []reconTerm
 	fetch                map[string][]fetchRange // xorb hash -> entries sorted by chunkStart
@@ -113,7 +112,6 @@ type reconstruction struct {
 func normalize(version int, base int64, offsetFirst int64, terms []termJSON, fetch map[string][]fetchRange) (*reconstruction, error) {
 	r := &reconstruction{
 		version:              version,
-		baseFileOffset:       base,
 		offsetIntoFirstRange: offsetFirst,
 		fetch:                fetch,
 	}
@@ -266,7 +264,7 @@ func statusError(resp *http.Response, what string) error {
 	if resp.StatusCode == http.StatusRequestedRangeNotSatisfiable {
 		return ErrRangeNotSatisfiable
 	}
-	return fmt.Errorf("xet: %s: unexpected status %s: %s", what, resp.Status, string(b))
+	return fmt.Errorf("xet: %s: unexpected status %s: %s", what, resp.Status, hfapi.SanitizeErrorText(string(b)))
 }
 
 func (c *Client) getReconV2(ctx context.Context, route, reqURL, rangeHeader string, base int64) (recon *reconstruction, fallbackReason string, err error) {

@@ -5,15 +5,17 @@ package sched
 import (
 	"context"
 	"errors"
-	"math"
 	"strings"
 )
 
 // statfsFree on genuinely-unknown platforms (unix and Windows have real free-
-// space queries) reports unlimited space: the ENOSPC pause still triggers on
-// write errors, it just resumes on the next poll.
+// space queries) fails explicitly so callers can use a writability probe
+// instead of treating the filesystem as having unlimited space.
 func statfsFree(ctx context.Context, dir string) (int64, error) {
-	return math.MaxInt64, ctx.Err()
+	if err := ctx.Err(); err != nil {
+		return 0, err
+	}
+	return 0, &FreeSpaceUnsupportedError{}
 }
 
 // isOutOfSpace without unix errnos: ENOSPC/EDQUOT surface through the

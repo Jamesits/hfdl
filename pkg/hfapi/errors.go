@@ -6,13 +6,31 @@ import (
 	"fmt"
 	"io"
 	"net/http"
-	"strconv"
+	"regexp"
 	"strings"
 	"time"
+
+	"github.com/jamesits/hfdl/pkg/config"
 )
 
 // maxErrorBody caps how much of an error response body is read for messages.
 const maxErrorBody = 4 << 10
+
+var (
+	// These deliberately redact common credential shapes while retaining the
+	// surrounding upstream diagnostic text.
+	bearerValue = regexp.MustCompile(`(?i)\bBearer\s+[^\s"'<>]+`)
+	namedSecret = regexp.MustCompile(`(?i)((?:token|key|signature|credential)[^=&\s]{0,16}=)[A-Za-z0-9_+./%:-]{33,}`)
+	urlQuery    = regexp.MustCompile(`(https?://[^\s?"'<>]+)\?[^\s"'<>]+`)
+)
+
+// SanitizeErrorText removes credential-like values and URL query strings
+// from bounded upstream diagnostics while preserving useful context.
+func SanitizeErrorText(s string) string {
+	s = bearerValue.ReplaceAllString(s, "Bearer [REDACTED]")
+	s = namedSecret.ReplaceAllString(s, `${1}[REDACTED]`)
+	return urlQuery.ReplaceAllString(s, "$1?[REDACTED]")
+}
 
 // ErrInvalidRepoRef is wrapped by every ParseRepoRef failure.
 var ErrInvalidRepoRef = errors.New("hfapi: invalid repo reference")
@@ -56,23 +74,12 @@ func (e *AuthError) Error() string {
 }
 
 // ParseRetryAfter interprets a Retry-After header value: either delta-seconds
-// or an HTTP-date. Unparseable/absent yields 0. Exported so xet (which maps CAS
-// 429s onto hfapi.RateLimitError) shares one implementation.
+// or an HTTP-date, clamped to [0, config.MaxRetryAfter]. Exported so xet
+// (which maps CAS 429s onto hfapi.RateLimitError) keeps working against this
+// package's API; the single implementation lives in config so transfer (which
+// deliberately does not import hfapi) shares it too.
 func ParseRetryAfter(h string) time.Duration {
-	h = strings.TrimSpace(h)
-	if h == "" {
-		return 0
-	}
-	if n, err := strconv.Atoi(h); err == nil {
-		if n < 0 {
-			return 0
-		}
-		return time.Duration(n) * time.Second
-	}
-	if t, err := http.ParseTime(h); err == nil {
-		return max(time.Until(t), 0)
-	}
-	return 0
+	return config.ParseRetryAfter(h)
 }
 
 // readErrMsg extracts a human-readable message from an error body: the
@@ -86,7 +93,7 @@ func readErrMsg(resp *http.Response) string {
 		Error string `json:"error"`
 	}
 	if json.Unmarshal(b, &v) == nil && v.Error != "" {
-		return v.Error
+		return SanitizeErrorText(v.Error)
 	}
-	return strings.TrimSpace(string(b))
+	return SanitizeErrorText(strings.TrimSpace(string(b)))
 }

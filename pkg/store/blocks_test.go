@@ -2,11 +2,25 @@ package store
 
 import (
 	"errors"
-	"fmt"
 	"sync"
 	"testing"
 	"time"
 )
+
+func TestLeaseBlocksRequiresDownloadingParent(t *testing.T) {
+	s := openTestStore(t)
+	ctx := t.Context()
+	repoID, _ := seedListedRepo(t, s, "org/repo", []FileEntry{{Path: "a", Size: 100, GitOID: "g"}})
+	fileID := mustFileID(t, s, repoID, "a")
+	leaseFile(t, s, fileID, 1)
+	if _, err := s.db.ExecContext(ctx, "UPDATE files SET status = ?, lease_token = NULL, lease_until = NULL WHERE id = ?", string(FileQueued), fileID); err != nil {
+		t.Fatal(err)
+	}
+	leased, err := s.LeaseBlocks(ctx, 1, BlockFilter{FileIDs: []int64{fileID}}, time.Now())
+	if err != nil || len(leased) != 0 {
+		t.Fatalf("LeaseBlocks with queued parent = (%d, %v), want empty", len(leased), err)
+	}
+}
 
 func TestLeaseBlocksPerBlockTokens(t *testing.T) {
 	s := openTestStore(t)
@@ -165,8 +179,8 @@ func TestRequeueBlock(t *testing.T) {
 	}
 
 	// Backed-off row is skipped until due, then re-leased and requeued again.
-	if got, _ := s.LeaseBlocks(ctx, 1, BlockFilter{FileIDs: []int64{fileID}}, time.Now()); len(got) != 0 {
-		t.Fatalf("backed-off block leased early")
+	if got, err := s.LeaseBlocks(ctx, 1, BlockFilter{FileIDs: []int64{fileID}}, time.Now()); err != nil || len(got) != 0 {
+		t.Fatalf("backed-off LeaseBlocks = (%d, %v), want empty", len(got), err)
 	}
 	leased, err = s.LeaseBlocks(ctx, 1, BlockFilter{FileIDs: []int64{fileID}}, backoff.Add(time.Second))
 	if err != nil || len(leased) != 1 {
@@ -197,24 +211,16 @@ func TestRequeueBlock(t *testing.T) {
 	}
 }
 
-// TestLeaseBlocksConcurrent hammers LeaseBlocks from 16 goroutines over
-// disjoint files: every block must be leased exactly once (race-clean).
+// TestLeaseBlocksConcurrent hammers the same file from 16 goroutines: every
+// block must be leased exactly once.
 func TestLeaseBlocksConcurrent(t *testing.T) {
 	s := openTestStore(t)
 	ctx := t.Context()
 	const workers = 16
-	const perFile = 4
-
-	entries := make([]FileEntry, workers)
-	for i := range entries {
-		entries[i] = FileEntry{Path: fmt.Sprintf("f%02d", i), Size: perFile * 100, GitOID: "g"}
-	}
-	repoID, _ := seedListedRepo(t, s, "org/repo", entries)
-	fileIDs := make([]int64, workers)
-	for i := range entries {
-		fileIDs[i] = mustFileID(t, s, repoID, entries[i].Path)
-		leaseFile(t, s, fileIDs[i], perFile)
-	}
+	const blocks = 64
+	repoID, _ := seedListedRepo(t, s, "org/repo", []FileEntry{{Path: "shared", Size: blocks * 100, GitOID: "g"}})
+	fileID := mustFileID(t, s, repoID, "shared")
+	leaseFile(t, s, fileID, blocks)
 
 	results := make([][]LeasedBlock, workers)
 	errs := make([]error, workers)
@@ -223,14 +229,16 @@ func TestLeaseBlocksConcurrent(t *testing.T) {
 		wg.Add(1)
 		go func(i int) {
 			defer wg.Done()
-			// Lease in two batches to interleave claims.
-			for b := 0; b < 2; b++ {
-				leased, err := s.LeaseBlocks(ctx, perFile/2, BlockFilter{FileIDs: []int64{fileIDs[i]}}, time.Now())
+			for {
+				leased, err := s.LeaseBlocks(ctx, 1, BlockFilter{FileIDs: []int64{fileID}}, time.Now())
 				if err != nil {
 					errs[i] = err
 					return
 				}
 				results[i] = append(results[i], leased...)
+				if len(leased) == 0 {
+					return
+				}
 			}
 		}(i)
 	}
@@ -241,9 +249,6 @@ func TestLeaseBlocksConcurrent(t *testing.T) {
 	for i := range results {
 		if errs[i] != nil {
 			t.Fatalf("worker %d: %v", i, errs[i])
-		}
-		if len(results[i]) != perFile {
-			t.Fatalf("worker %d leased %d, want %d", i, len(results[i]), perFile)
 		}
 		for _, lb := range results[i] {
 			if ids[lb.ID] {
@@ -256,8 +261,8 @@ func TestLeaseBlocksConcurrent(t *testing.T) {
 			toks[lb.Token] = true
 		}
 	}
-	if len(ids) != workers*perFile {
-		t.Fatalf("leased %d blocks total, want %d", len(ids), workers*perFile)
+	if len(ids) != blocks {
+		t.Fatalf("leased %d blocks total, want %d", len(ids), blocks)
 	}
 
 	// Everything claimed: nothing pending remains.

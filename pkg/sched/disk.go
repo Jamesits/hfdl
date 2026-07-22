@@ -20,7 +20,9 @@ import (
 // (so salvage matches appear before downloads finish), salvage-apply, then
 // verify. All three run their reads/writes under the shared DutyLimiter: the
 // verifier (hash + de-sparse) checkpoints the limiter internally, and copyFile
-// checkpoints it per chunk — so --disk-active throttles every heavy IO path.
+// checkpoints it per chunk — so --disk-active throttles all three (install
+// copies pace under the same limiter inside the installer; network block
+// writes are paced by the bandwidth bucket instead).
 
 // diskWorkerCount returns the disk-queue depth. A positive override
 // (--hfdl-disk-workers) pins the count; override <= 0 auto-selects by
@@ -99,17 +101,25 @@ func (m *Manager) tryReferenceHash(ctx context.Context) (bool, error) {
 	if err != nil {
 		return false, err
 	}
+	ctx, cancel := context.WithCancel(ctx)
+	defer cancel()
 
 	// Stale-stat guard: a changed reference must not be hashed under its
 	// old invalidation key (size+mtime_ns+dev+ino) — refresh the row instead.
 	info, statErr := os.Stat(ref.Path)
 	if statErr == nil {
-		dev, ino := devIno(ref.Path, info)
+		dev, ino, identityErr := devIno(ref.Path, info)
+		if identityErr != nil {
+			m.identityUnsupportedOnce.Do(func() {
+				m.log.Warn("filesystem identity unavailable; skipping identity-based reference invalidation", "err", identityErr)
+			})
+			dev, ino = ref.Dev, ref.Ino
+		}
 		if info.Size() != ref.Size || info.ModTime().UnixNano() != ref.MtimeNs || dev != ref.Dev || ino != ref.Ino {
 			if ierr := m.storeCall(ctx, func() error { return m.st.InvalidateReference(ctx, ref.ID) }); ierr != nil {
 				return true, ierr
 			}
-			dev2, ino2 := devIno(ref.Path, info)
+			dev2, ino2, _ := devIno(ref.Path, info)
 			if aerr := m.st.AddReferenceFiles(ctx, []store.ReferenceFile{{
 				Path: ref.Path, Size: info.Size(), MtimeNs: info.ModTime().UnixNano(), Dev: dev2, Ino: ino2,
 			}}); aerr != nil {
@@ -123,7 +133,7 @@ func (m *Manager) tryReferenceHash(ctx context.Context) (bool, error) {
 	defer hbStop()
 	go m.heartbeat(hbCtx, func(until time.Time) error {
 		return m.st.RenewLease(ctx, store.LeaseReference, ref.ID, tok, until)
-	}, nil)
+	}, cancel, "lease_kind", store.LeaseReference, "reference_id", ref.ID)
 
 	complete := func(sha string, cause error) (bool, error) {
 		if cerr := m.storeCall(ctx, func() error {
@@ -174,6 +184,8 @@ func (m *Manager) trySalvageApply(ctx context.Context, calc *throttle.DutyCalc) 
 	if err != nil {
 		return false, err
 	}
+	ctx, cancel := context.WithCancel(ctx)
+	defer cancel()
 
 	// Heartbeat the salvage lease so a long copy is not reclaimed mid-flight;
 	// a crash requeues it via Recover (salvaging→queued).
@@ -181,7 +193,7 @@ func (m *Manager) trySalvageApply(ctx context.Context, calc *throttle.DutyCalc) 
 	defer hbStop()
 	go m.heartbeat(hbCtx, func(until time.Time) error {
 		return m.st.RenewLease(ctx, store.LeaseFile, f.ID, tok, until)
-	}, nil)
+	}, cancel, "lease_kind", store.LeaseFile, "file_id", f.ID)
 
 	ref, err := m.findSalvageMatch(ctx, f)
 	if err != nil {
@@ -327,12 +339,14 @@ func (m *Manager) tryVerify(ctx context.Context) (bool, error) {
 	if err != nil {
 		return false, err
 	}
+	ctx, cancel := context.WithCancel(ctx)
+	defer cancel()
 
 	hbCtx, hbStop := context.WithCancel(ctx)
 	defer hbStop()
 	go m.heartbeat(hbCtx, func(until time.Time) error {
 		return m.st.RenewLease(ctx, store.LeaseFile, f.ID, tok, until)
-	}, nil)
+	}, cancel, "lease_kind", store.LeaseFile, "file_id", f.ID)
 
 	if verr := m.verifyFile(ctx, f); verr != nil {
 		if m.noteIOError(ctx, verr) {

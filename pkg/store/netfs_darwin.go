@@ -12,7 +12,7 @@ import (
 func probeNetFS(dir string) (kind string, netfs bool, err error) {
 	var st unix.Statfs_t
 	if err := unix.Statfs(dir, &st); err != nil {
-		return "", false, nil // cannot resolve: do not block startup
+		return "", false, err
 	}
 	name := fstypename(&st)
 	switch name {

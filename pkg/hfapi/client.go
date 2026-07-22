@@ -25,11 +25,12 @@ type Client struct {
 	hc  *http.Client // follows redirects; transport attaches auth per hop
 	// hcNoFollow serves HEAD resolve calls: the Hub puts X-Xet-* metadata on
 	// its own (possibly 302) response, which following the redirect would lose.
-	hcNoFollow  *http.Client
-	endpoint    string
-	etagTimeout time.Duration
-	tracer      trace.Tracer        // nil = no spans; set before concurrent use
-	reqCounter  metric.Int64Counter // nil = no request metric; set before concurrent use
+	hcNoFollow     *http.Client
+	endpoint       string
+	endpointOrigin string
+	etagTimeout    time.Duration
+	tracer         trace.Tracer        // nil = no spans; set before concurrent use
+	reqCounter     metric.Int64Counter // nil = no request metric; set before concurrent use
 }
 
 // NewClient wraps hc so that the bearer token and User-Agent are attached by
@@ -43,22 +44,24 @@ func NewClient(log *slog.Logger, hc *http.Client, endpoint, token string, etagTi
 		log = slog.New(slog.DiscardHandler)
 	}
 	endpoint = strings.TrimRight(endpoint, "/")
-	hubHost := ""
-	if u, err := url.Parse(endpoint); err == nil {
-		hubHost = u.Host
+	endpointOrigin := ""
+	if u, err := url.Parse(endpoint); err == nil && u.Scheme != "" && u.Host != "" {
+		u.User, u.Path, u.RawPath, u.RawQuery, u.Fragment = nil, "", "", "", ""
+		endpointOrigin = u.String()
 	}
 	inner := *hc
-	inner.Transport = config.NewAuthTransport(hc.Transport, hubHost, token, config.UserAgent())
+	inner.Transport = config.NewAuthTransport(hc.Transport, endpoint, token, config.UserAgent())
 	noFollow := inner
 	noFollow.CheckRedirect = func(_ *http.Request, _ []*http.Request) error {
 		return http.ErrUseLastResponse
 	}
 	return &Client{
-		log:         log,
-		hc:          &inner,
-		hcNoFollow:  &noFollow,
-		endpoint:    endpoint,
-		etagTimeout: etagTimeout,
+		log:            log,
+		hc:             &inner,
+		hcNoFollow:     &noFollow,
+		endpoint:       endpoint,
+		endpointOrigin: endpointOrigin,
+		etagTimeout:    etagTimeout,
 	}
 }
 
@@ -101,7 +104,7 @@ func (c *Client) recordRequest(ctx context.Context, result string) {
 		return
 	}
 	c.reqCounter.Add(ctx, 1, metric.WithAttributes(
-		attribute.String("endpoint", c.endpoint),
+		attribute.String("endpoint", c.endpointOrigin),
 		attribute.String("result", result),
 	))
 }

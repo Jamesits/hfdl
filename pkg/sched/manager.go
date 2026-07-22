@@ -52,6 +52,9 @@ const (
 	// heartbeatInterval renews store leases well inside the 30s lease
 	// window (store.leaseDuration).
 	heartbeatInterval = 10 * time.Second
+	// leaseTTL matches the store's lease duration and bounds how long guarded
+	// work may continue while renewals cannot reach the database.
+	leaseTTL = 30 * time.Second
 	// recoverInterval is the periodic Recover cadence: every lease
 	// interval. 30s matches the store lease duration.
 	recoverInterval = 30 * time.Second
@@ -221,14 +224,16 @@ type Manager struct {
 	enospcBackoffNs atomic.Int64
 
 	// test seams.
-	statfsFreeFn     func(ctx context.Context, dir string) (int64, error)
-	probeFn          func(ctx context.Context, dir string, bytes int64) error
-	probeGiveUpLimit int
-	probeBackoffMax  time.Duration
-	enospcPoll       time.Duration
-	nowFn            func() time.Time
-	recoverInterval  time.Duration // defaults to recoverInterval const
-	runDownload      func(ctx context.Context, t *transfer.FileTask, sink *fcio.File, progress transfer.ProgressSink) error
+	statfsFreeFn             func(ctx context.Context, dir string) (int64, error)
+	probeFn                  func(ctx context.Context, dir string, bytes int64) error
+	probeGiveUpLimit         int
+	probeBackoffMax          time.Duration
+	enospcPoll               time.Duration
+	nowFn                    func() time.Time
+	recoverInterval          time.Duration // defaults to recoverInterval const
+	runDownload              func(ctx context.Context, t *transfer.FileTask, sink *fcio.File, progress transfer.ProgressSink) error
+	freeSpaceUnsupportedOnce sync.Once
+	identityUnsupportedOnce  sync.Once
 }
 
 type jobHeader struct {
@@ -373,16 +378,37 @@ func (m *Manager) repoFor(ctx context.Context, repoID int64) (*store.Repo, error
 
 // heartbeat renews a store lease until done closes; a fencing failure
 // (lease lost) is reported through onFenced so the worker abandons its row.
-func (m *Manager) heartbeat(ctx context.Context, renew func(until time.Time) error, onFenced func()) {
+func (m *Manager) heartbeat(ctx context.Context, renew func(until time.Time) error, onFenced func(), attrs ...any) {
 	tick := time.NewTicker(heartbeatInterval)
 	defer tick.Stop()
+	var failingSince time.Time
+	leaseUntil := m.nowFn().Add(leaseTTL)
 	for {
 		select {
 		case <-ctx.Done():
 			return
 		case <-tick.C:
-			err := renew(m.nowFn().Add(2 * heartbeatInterval))
+			now := m.nowFn()
+			nextUntil := now.Add(2 * heartbeatInterval)
+			err := renew(nextUntil)
 			if errors.Is(err, store.ErrFenced) {
+				if onFenced != nil {
+					onFenced()
+				}
+				return
+			}
+			if err == nil {
+				failingSince = time.Time{}
+				leaseUntil = nextUntil
+				continue
+			}
+			if failingSince.IsZero() {
+				failingSince = now
+			}
+			logAttrs := append(append([]any{}, attrs...), "err", err, "failed_for", now.Sub(failingSince))
+			m.log.Warn("lease renewal failed", logAttrs...)
+			if !now.Before(leaseUntil) {
+				m.log.Error("lease renewal unavailable past lease TTL; abandoning guarded work", logAttrs...)
 				if onFenced != nil {
 					onFenced()
 				}

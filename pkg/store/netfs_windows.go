@@ -15,11 +15,11 @@ import (
 func probeNetFS(dir string) (kind string, netfs bool, err error) {
 	root, err := volumeRoot(dir)
 	if err != nil {
-		return "", false, nil // cannot resolve: do not block startup
+		return "", false, err
 	}
 	rootp, err := windows.UTF16PtrFromString(root)
 	if err != nil {
-		return "", false, nil
+		return "", false, fmt.Errorf("store: encode volume root: %w", err)
 	}
 	if windows.GetDriveType(rootp) == windows.DRIVE_REMOTE {
 		return "remote", true, nil

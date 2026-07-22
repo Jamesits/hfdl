@@ -2,10 +2,12 @@ package xet
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"io"
 	"log/slog"
 	"net/http"
+	"net/url"
 	"sort"
 	"sync"
 	"time"
@@ -106,13 +108,13 @@ func (s *Source) reconAndGen() (*reconstruction, int) {
 	return s.recon, s.gen
 }
 
-// Boundaries snaps block edges to term boundaries: fetched xorb bytes are
-// not file bytes, so a whole term is decoded to yield any of its bytes and a
-// block should own whole terms. The LEADING edge of each missing interval is
-// snapped down to the enclosing term's fileStart (so a block starts on a term
-// boundary — the head bytes it pulls in are decoded from that same term
-// regardless), clamped to the previous missing interval's end so the snap
-// never reaches back over bytes already present from an earlier gap. The
+// Boundaries expands both edges to enclosing term boundaries: fetched xorb
+// bytes are not file bytes, so a whole term is decoded to yield any of its
+// bytes and a block should own whole terms. The LEADING edge of each missing
+// interval is snapped down to the enclosing term's fileStart (so a block
+// starts on a term boundary — the head bytes it pulls in are decoded from that same term
+// regardless), clamped to the previous expanded interval's end. The trailing
+// edge is snapped up to its term end and clamped to the file size. The
 // interior/forward edges are split at the next term file-end and at the
 // blockSize grid, so no returned interval crosses a term boundary and none
 // exceeds blockSize. transfer chunks these at blockSize afterwards; for
@@ -124,14 +126,18 @@ func (s *Source) Boundaries(missing []transfer.Interval, blockSize int64) []tran
 		return missing
 	}
 	var out []transfer.Interval
-	var prevEnd int64 // end of the previous missing interval; leading-edge snap floor
+	var prevEnd int64 // end of the previous expanded interval; leading-edge snap floor
 	for _, m := range missing {
 		start := recon.termStartAt(m.Start)
 		if start < prevEnd {
 			start = prevEnd
 		}
-		for p := start; p < m.End; {
-			edge := m.End
+		end := recon.termEndAt(m.End)
+		if end > s.size {
+			end = s.size
+		}
+		for p := start; p < end; {
+			edge := end
 			if te := recon.nextTermEdge(p); te > p && te < edge {
 				edge = te
 			}
@@ -143,9 +149,20 @@ func (s *Source) Boundaries(missing []transfer.Interval, blockSize int64) []tran
 			out = append(out, transfer.Interval{Start: p, End: edge})
 			p = edge
 		}
-		prevEnd = m.End
+		prevEnd = end
 	}
 	return out
+}
+
+func (r *reconstruction) termEndAt(pos int64) int64 {
+	if pos <= 0 {
+		return pos
+	}
+	i := sort.Search(len(r.terms), func(i int) bool { return r.terms[i].fileEnd >= pos })
+	if i >= len(r.terms) || r.terms[i].fileStart >= pos {
+		return pos
+	}
+	return r.terms[i].fileEnd
 }
 
 // nextTermEdge returns the smallest term file-end strictly greater than pos
@@ -173,8 +190,9 @@ func (r *reconstruction) termStartAt(pos int64) int64 {
 	return r.terms[i].fileStart
 }
 
-// Open streams decoded file bytes of [off, off+length). The returned reader
-// is backed by a producer goroutine; Close (or ctx cancel) unblocks it.
+// Open streams decoded file bytes of [off, off+length). A zero length returns
+// an immediately-EOF reader without starting a producer. Other readers are
+// backed by a producer goroutine; Close (or ctx cancel) unblocks it.
 func (s *Source) Open(ctx context.Context, off, length int64) (io.ReadCloser, error) {
 	recon := s.current()
 	if recon == nil {
@@ -186,6 +204,9 @@ func (s *Source) Open(ctx context.Context, off, length int64) (io.ReadCloser, er
 	if off < 0 || length < 0 || off > s.size || length > s.size-off {
 		return nil, fmt.Errorf("xet: open range off=%d length=%d outside file size %d: %w", off, length, s.size, ErrRangeNotSatisfiable)
 	}
+	if length == 0 {
+		return io.NopCloser(&emptyReader{}), nil
+	}
 	pr, pw := io.Pipe()
 	go s.stream(ctx, off, off+length, pw)
 	// io.Pipe writes don't observe ctx; closing the reader on cancel
@@ -193,6 +214,10 @@ func (s *Source) Open(ctx context.Context, off, length int64) (io.ReadCloser, er
 	stop := context.AfterFunc(ctx, func() { _ = pr.CloseWithError(ctx.Err()) })
 	return &reader{ReadCloser: pr, stop: stop}, nil
 }
+
+type emptyReader struct{}
+
+func (*emptyReader) Read([]byte) (int, error) { return 0, io.EOF }
 
 type reader struct {
 	io.ReadCloser
@@ -456,12 +481,12 @@ func (c *Client) getSignedRange(ctx context.Context, e fetchRange) (b []byte, fo
 	}
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, e.url, nil)
 	if err != nil {
-		return nil, false, fmt.Errorf("xet: build signed range request: %w", err)
+		return nil, false, fmt.Errorf("xet: build signed range request: %w", sanitizeSignedURLError(err, e.url))
 	}
 	req.Header.Set("Range", fmt.Sprintf("bytes=%d-%d", e.byteStart, e.byteEnd))
 	resp, err := c.hc.Do(req)
 	if err != nil {
-		return nil, false, fmt.Errorf("xet: signed range GET: %w", err)
+		return nil, false, fmt.Errorf("xet: signed range GET: %w", sanitizeSignedURLError(err, e.url))
 	}
 	defer resp.Body.Close()
 	switch resp.StatusCode {
@@ -472,7 +497,7 @@ func (c *Client) getSignedRange(ctx context.Context, e fetchRange) (b []byte, fo
 		return nil, false, &hfapi.RateLimitError{RetryAfter: hfapi.ParseRetryAfter(resp.Header.Get("Retry-After"))}
 	default:
 		body, _ := io.ReadAll(io.LimitReader(resp.Body, maxErrorBody))
-		return nil, false, fmt.Errorf("xet: signed range GET: unexpected status %s: %s", resp.Status, string(body))
+		return nil, false, fmt.Errorf("xet: signed range GET: unexpected status %s: %s", resp.Status, hfapi.SanitizeErrorText(string(body)))
 	}
 	want := e.byteEnd - e.byteStart + 1
 	b, err = io.ReadAll(io.LimitReader(resp.Body, want+1))
@@ -485,4 +510,18 @@ func (c *Client) getSignedRange(ctx context.Context, e fetchRange) (b []byte, fo
 		}
 	}
 	return b, false, nil
+}
+
+func sanitizeSignedURLError(err error, rawURL string) error {
+	cause := err
+	var uerr *url.Error
+	if errors.As(err, &uerr) {
+		cause = uerr.Err
+	}
+	u, parseErr := url.Parse(rawURL)
+	if parseErr != nil {
+		return cause
+	}
+	u.User, u.RawQuery, u.Fragment = nil, "", ""
+	return fmt.Errorf("request to %s: %w", u.String(), cause)
 }

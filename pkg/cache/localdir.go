@@ -26,7 +26,7 @@ const gitignoreContent = "*"
 // FileLock leaves behind after a successful download.
 func (in *Installer) writeLocalDirStamps(destDir, repoPath string) error {
 	cacheDir := filepath.Join(destDir, ".cache", "huggingface")
-	if err := os.MkdirAll(cacheDir, 0o755); err != nil {
+	if err := mkdirAllSync(cacheDir, 0o755, in.fsyncDirFn); err != nil {
 		return fmt.Errorf("cache: create local-dir cache dir: %w", err)
 	}
 	for path, content := range map[string]string{
@@ -53,7 +53,7 @@ func (in *Installer) writeLocalDirStamps(destDir, repoPath string) error {
 		return err
 	}
 	lockDir := filepath.Dir(lockPath)
-	if err := os.MkdirAll(lockDir, 0o755); err != nil {
+	if err := mkdirAllSync(lockDir, 0o755, in.fsyncDirFn); err != nil {
 		return fmt.Errorf("cache: create lock dir: %w", err)
 	}
 	if err := createEmptyFile(lockPath); err != nil {

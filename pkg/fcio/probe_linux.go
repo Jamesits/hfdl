@@ -7,10 +7,15 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"sort"
 	"strings"
 
 	"golang.org/x/sys/unix"
 )
+
+var sysfsRoot = "/sys"
+
+const maxBlockDeviceDepth = 64
 
 // statfs f_type magic for network filesystems (linux/magic.h).
 const (
@@ -57,7 +62,7 @@ func ProbeFs(ctx context.Context, path string) (FsType, error) {
 // directory. Errors (device-mapper, loop, netfs, tmpfs — no block queue
 // behind them) leave the caller to fall back.
 func blockDeviceDir(dev uint64) (string, error) {
-	link := fmt.Sprintf("/sys/dev/block/%d:%d", unix.Major(dev), unix.Minor(dev))
+	link := filepath.Join(sysfsRoot, "dev", "block", fmt.Sprintf("%d:%d", unix.Major(dev), unix.Minor(dev)))
 	target, err := os.Readlink(link)
 	if err != nil {
 		return "", fmt.Errorf("readlink %s: %w", link, err)
@@ -65,12 +70,62 @@ func blockDeviceDir(dev uint64) (string, error) {
 	if !filepath.IsAbs(target) {
 		target = filepath.Join(filepath.Dir(link), target)
 	}
-	for p := filepath.Clean(target); strings.HasPrefix(p, "/sys"); p = filepath.Dir(p) {
+	root := filepath.Clean(sysfsRoot)
+	for p := filepath.Clean(target); p == root || strings.HasPrefix(p, root+string(filepath.Separator)); p = filepath.Dir(p) {
 		if _, err := os.Stat(filepath.Join(p, "queue", "rotational")); err == nil {
 			return p, nil
 		}
 	}
 	return "", fmt.Errorf("no queue/rotational found under %s", target)
+}
+
+// physicalDeviceIDs follows stacked block devices to their leaf slaves. A
+// sorted composite ID keeps VolumeSet's single-key locking model while making
+// differently ordered multi-device stacks resolve deterministically.
+func physicalDeviceIDs(dir string) ([]string, error) {
+	ids := make(map[string]struct{})
+	visited := make(map[string]struct{})
+	var walk func(string, int) error
+	walk = func(current string, depth int) error {
+		if depth > maxBlockDeviceDepth {
+			return fmt.Errorf("block device stack exceeds depth %d", maxBlockDeviceDepth)
+		}
+		resolved, err := filepath.EvalSymlinks(current)
+		if err == nil {
+			current = resolved
+		}
+		current = filepath.Clean(current)
+		if _, ok := visited[current]; ok {
+			return nil
+		}
+		visited[current] = struct{}{}
+		slaves, err := os.ReadDir(filepath.Join(current, "slaves"))
+		if err == nil && len(slaves) != 0 {
+			for _, slave := range slaves {
+				if err := walk(filepath.Join(current, "slaves", slave.Name()), depth+1); err != nil {
+					return err
+				}
+			}
+			return nil
+		}
+		id := filepath.Base(current)
+		if b, err := os.ReadFile(filepath.Join(current, "dev")); err == nil {
+			if dev := strings.TrimSpace(string(b)); dev != "" {
+				id = dev
+			}
+		}
+		ids[id] = struct{}{}
+		return nil
+	}
+	if err := walk(dir, 0); err != nil {
+		return nil, err
+	}
+	result := make([]string, 0, len(ids))
+	for id := range ids {
+		result = append(result, id)
+	}
+	sort.Strings(result)
+	return result, nil
 }
 
 // lookupRotational reports whether the whole device behind st_dev is a
@@ -100,10 +155,8 @@ func statVolumeID(path string) (VolumeID, error) {
 		return "", fmt.Errorf("fcio: stat volume %s: %w", p, err)
 	}
 	if dir, err := blockDeviceDir(st.Dev); err == nil {
-		if b, rerr := os.ReadFile(filepath.Join(dir, "dev")); rerr == nil {
-			if s := strings.TrimSpace(string(b)); s != "" {
-				return VolumeID(s), nil
-			}
+		if ids, rerr := physicalDeviceIDs(dir); rerr == nil && len(ids) != 0 {
+			return VolumeID(strings.Join(ids, "+")), nil
 		}
 		return VolumeID(filepath.Base(dir)), nil
 	}

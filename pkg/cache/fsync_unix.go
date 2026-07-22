@@ -9,7 +9,8 @@ import (
 
 // fsyncDir fsyncs a directory so a link/rename inside it survives a crash:
 // namespace durability requires fsyncing the parent directory after the
-// entry is created.
+// entry is created. On macOS plain fsync deliberately covers OS-crash
+// durability; drive-cache power-loss durability via F_FULLFSYNC is not required.
 func fsyncDir(dir string) error {
 	d, err := os.Open(dir)
 	if err != nil {

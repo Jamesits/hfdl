@@ -151,7 +151,11 @@ func (c *Client) casToken(ctx context.Context, route string) (*hfapi.XetToken, e
 	c.tokenRoute = route
 	c.tokenCasURL = c.casBase(tok)
 	if u, err := url.Parse(c.tokenCasURL); err == nil {
-		sp.SetAttributes(attribute.String("hfdl.xet.cas_host", u.Host))
+		host := u.Hostname()
+		if u.Port() != "" {
+			host += ":" + u.Port()
+		}
+		sp.SetAttributes(attribute.String("hfdl.xet.cas_host", host))
 	}
 	sp.SetAttributes(attribute.Int64("hfdl.xet.token_expiry", tok.Exp.Unix()))
 	return tok, nil
@@ -183,12 +187,12 @@ func (c *Client) doCAS(ctx context.Context, route, reqURL, rangeHeader string) (
 		if err != nil {
 			return nil, fmt.Errorf("xet: build CAS request %s: %w", reqURL, err)
 		}
-		req.Header.Set("Authorization", "Bearer "+tok.AccessToken)
-		req.Header.Set("User-Agent", config.UserAgent())
 		if rangeHeader != "" {
 			req.Header.Set("Range", rangeHeader)
 		}
-		resp, err := c.hc.Do(req)
+		client := *c.hc
+		client.Transport = config.NewAuthTransport(c.hc.Transport, c.casBase(tok), tok.AccessToken, config.UserAgent())
+		resp, err := client.Do(req)
 		if err != nil {
 			return nil, fmt.Errorf("xet: CAS GET %s: %w", reqURL, err)
 		}

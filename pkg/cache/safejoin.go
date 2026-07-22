@@ -8,9 +8,8 @@ import (
 	"strings"
 )
 
-// PathSafetyError rejects a repo-supplied path before any filesystem join
-// when it is absolute, contains .., or escapes the destination root via
-// symlink.
+// PathSafetyError rejects a repo-supplied path that is absolute, contains ..,
+// or escapes the destination root via symlink.
 type PathSafetyError struct {
 	Path   string
 	Reason string
@@ -21,16 +20,17 @@ func (e *PathSafetyError) Error() string {
 }
 
 // SafeJoin joins a repo-supplied relative path p onto root for a
-// POINTER-INSTALL target, rejecting absolute paths, any ".." component, and
-// ancestor-chain symlink escapes. The leaf itself is deliberately NOT resolved
-// because huggingface_hub snapshot entries are relative symlinks into blobs/
-// (a sibling of snapshots/) that hfdl creates by design; resolving the leaf
-// would reject them by construction. Snapshot symlinks are (re)created via an
-// atomic remove-then-symlink that never follows an existing leaf, so a hostile
-// pre-placed leaf here cannot redirect a write. Content writers must use
-// SafeJoinContent instead.
+// target, rejecting absolute paths, any ".." component, and symlink escapes,
+// including a pre-existing leaf symlink.
 func SafeJoin(root, p string) (string, error) {
-	return safeJoin(root, p, false)
+	containmentRoot := root
+	// Snapshot pointers legitimately resolve from <model>/snapshots/<sha> to
+	// the cache-root blobs directory. Broaden only this known layout; arbitrary
+	// SafeJoin roots still require containment beneath the supplied root.
+	if snapshots := filepath.Dir(root); filepath.Base(snapshots) == "snapshots" {
+		containmentRoot = filepath.Dir(filepath.Dir(snapshots))
+	}
+	return safeJoinWithin(root, containmentRoot, p, true)
 }
 
 // SafeJoinContent joins p onto root for a CONTENT-WRITE target (refs files,
@@ -40,7 +40,7 @@ func SafeJoin(root, p string) (string, error) {
 // planted at the write target can never redirect an O_TRUNC write outside the
 // destination tree (symlink escape). A leaf symlink that stays inside root is permitted.
 func SafeJoinContent(root, p string) (string, error) {
-	return safeJoin(root, p, true)
+	return safeJoinWithin(root, root, p, true)
 }
 
 // validateRepoPath applies the repo-supplied relative-path rules without
@@ -53,6 +53,9 @@ func validateRepoPath(p string) error {
 	}
 	if filepath.IsAbs(p) || strings.HasPrefix(p, "/") {
 		return &PathSafetyError{Path: p, Reason: "absolute path"}
+	}
+	if strings.ContainsRune(p, '\\') {
+		return &PathSafetyError{Path: p, Reason: "contains backslash path separator"}
 	}
 	for _, comp := range strings.Split(filepath.ToSlash(p), "/") {
 		if comp == ".." {
@@ -76,12 +79,12 @@ func validateComponent(name string) error {
 	return nil
 }
 
-func safeJoin(root, p string, resolveLeaf bool) (string, error) {
+func safeJoinWithin(root, containmentRoot, p string, resolveLeaf bool) (string, error) {
 	if err := validateRepoPath(p); err != nil {
 		return "", err
 	}
 	joined := filepath.Join(root, filepath.FromSlash(p))
-	resolvedRoot, err := resolvePath(root)
+	resolvedRoot, err := resolvePath(containmentRoot)
 	if err != nil {
 		return "", fmt.Errorf("cache: resolve root %s: %w", root, err)
 	}

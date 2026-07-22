@@ -2,7 +2,6 @@ package cache
 
 import (
 	"fmt"
-	"os"
 	"path/filepath"
 	"strconv"
 	"time"
@@ -19,13 +18,10 @@ func (in *Installer) writeDownloadMetadata(destDir, repoPath, commitSHA, etag st
 		return err
 	}
 	parent := filepath.Dir(metaPath)
-	if err := os.MkdirAll(parent, 0o755); err != nil {
+	if err := mkdirAllSync(parent, 0o755, in.fsyncDirFn); err != nil {
 		return fmt.Errorf("cache: create metadata dir: %w", err)
 	}
 	ts := strconv.FormatFloat(float64(time.Now().UnixNano())/1e9, 'f', -1, 64)
 	content := commitSHA + "\n" + etag + "\n" + ts + "\n"
-	if err := writeFileSync(metaPath, []byte(content), 0o644); err != nil {
-		return err
-	}
-	return in.fsyncDirFn(parent)
+	return atomicWriteFileSync(metaPath, []byte(content), 0o644, in.fsyncDirFn)
 }

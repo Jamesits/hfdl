@@ -61,6 +61,18 @@ func assertDense(t *testing.T, path string, size int64) {
 func TestDeSparseFallocate(t *testing.T) {
 	c, e := newTestChecker(t)
 	const size = int64(1 << 20)
+	probe := makeSparseFile(t, size)
+	pf, err := e.Open(t.Context(), probe, -1, fcio.Hints{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := pf.Fallocate(size); err != nil {
+		_ = pf.Close()
+		t.Skipf("filesystem does not support fallocate: %v", err)
+	}
+	if err := pf.Close(); err != nil {
+		t.Fatal(err)
+	}
 	path := makeSparseFile(t, size)
 	f, err := e.Open(t.Context(), path, -1, fcio.Hints{})
 	if err != nil {
@@ -71,12 +83,10 @@ func TestDeSparseFallocate(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	// tmpfs/ext4 both take the fallocate path; if this filesystem does not,
-	// the walk result is still valid — density is the invariant.
-	if method != methodFallocate && method != methodWalk {
-		t.Errorf("method = %q", method)
+	if method != methodFallocate {
+		t.Errorf("method = %q, want %q", method, methodFallocate)
 	}
-	if method == methodFallocate && holeBytes != 0 {
+	if holeBytes != 0 {
 		t.Errorf("fallocate holeBytes = %d, want 0", holeBytes)
 	}
 	assertDense(t, path, size)

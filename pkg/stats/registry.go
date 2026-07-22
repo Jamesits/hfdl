@@ -74,26 +74,27 @@ func NewWithClock(clock func() time.Time) *Registry {
 
 func (r *Registry) nowSec() int64 { return r.clock().Unix() }
 
-// file returns the entry for fileID, creating it on first use.
-func (r *Registry) file(fileID int64) *fileEntry {
-	if f := r.fileIfExists(fileID); f != nil {
-		return f
-	}
-	r.filesMu.Lock()
+// updateFile keeps the entry reachable for the whole update. RemoveFile's
+// write lock therefore orders deletion after every update that found or
+// created the entry.
+func (r *Registry) updateFile(fileID int64, update func(*fileEntry)) {
+	r.filesMu.RLock()
 	f := r.files[fileID]
+	if f != nil {
+		update(f)
+		r.filesMu.RUnlock()
+		return
+	}
+	r.filesMu.RUnlock()
+
+	r.filesMu.Lock()
+	f = r.files[fileID]
 	if f == nil {
 		f = &fileEntry{live: make(map[string]int64)}
 		r.files[fileID] = f
 	}
+	update(f)
 	r.filesMu.Unlock()
-	return f
-}
-
-func (r *Registry) fileIfExists(fileID int64) *fileEntry {
-	r.filesMu.RLock()
-	f := r.files[fileID]
-	r.filesMu.RUnlock()
-	return f
 }
 
 // upstream returns the entry for upstream, creating it on first use.
@@ -127,9 +128,10 @@ func (r *Registry) AddNetwork(n int64) {
 
 // AddFile records n downloaded bytes for fileID and feeds its rate ring.
 func (r *Registry) AddFile(fileID int64, n int64) {
-	f := r.file(fileID)
-	f.done.Add(n)
-	f.ring.Add(r.nowSec(), n)
+	r.updateFile(fileID, func(f *fileEntry) {
+		f.done.Add(n)
+		f.ring.Add(r.nowSec(), n)
+	})
 }
 
 // AddUpstream records n bytes served by upstream and feeds its windowed rate
@@ -165,7 +167,7 @@ func (r *Registry) ReportUpstreamRate(upstream string, bps float64) {
 // reportRate) should call this so the per-file EMA is populated alongside the
 // per-upstream one.
 func (r *Registry) ReportFileRate(fileID int64, bps float64) {
-	foldEMA(&r.file(fileID).ema, bps)
+	r.updateFile(fileID, func(f *fileEntry) { foldEMA(&f.ema, bps) })
 }
 
 // PenalizeUpstream halves the upstream's EMA (e.g. on stall/throttle).
@@ -183,13 +185,14 @@ func (r *Registry) PenalizeUpstream(upstream string) {
 // ConnStart opens a connection: bumps the global gauge, the file's gauge,
 // the upstream's gauge, and pins upstream in the file's live-upstream set.
 func (r *Registry) ConnStart(fileID int64, upstream string) {
-	r.conns.Add(1)
-	f := r.file(fileID)
-	f.conns.Add(1)
-	f.liveMu.Lock()
-	f.live[upstream]++
-	f.liveMu.Unlock()
-	r.upstream(upstream).conns.Add(1)
+	r.updateFile(fileID, func(f *fileEntry) {
+		r.conns.Add(1)
+		f.conns.Add(1)
+		f.liveMu.Lock()
+		f.live[upstream]++
+		f.liveMu.Unlock()
+		r.upstream(upstream).conns.Add(1)
+	})
 }
 
 // subClamp atomically subtracts delta from a, never dropping below 0, so an
@@ -216,14 +219,17 @@ func subClamp(a *atomic.Int64, delta int64) {
 // whose file was already removed and reconciled) is dropped rather than
 // driving the global and upstream gauges negative.
 func (r *Registry) ConnEnd(fileID int64, upstream string) {
-	f := r.fileIfExists(fileID)
+	r.filesMu.RLock()
+	f := r.files[fileID]
 	if f == nil {
+		r.filesMu.RUnlock()
 		return // file removed (already reconciled) or never started: drop
 	}
 	f.liveMu.Lock()
 	n := f.live[upstream]
 	if n <= 0 {
 		f.liveMu.Unlock()
+		r.filesMu.RUnlock()
 		return // unpaired end for this upstream: drop
 	}
 	if n == 1 {
@@ -238,6 +244,7 @@ func (r *Registry) ConnEnd(fileID int64, upstream string) {
 	if u := r.upstreamIfExists(upstream); u != nil {
 		subClamp(&u.conns, 1)
 	}
+	r.filesMu.RUnlock()
 }
 
 // AddStall tallies a stall blamed on upstream.
@@ -252,7 +259,7 @@ func (r *Registry) AddSalvaged(n int64) { r.totalSalvaged.Add(n) }
 
 // SetFileTotal sets the expected size of fileID for done/total progress.
 func (r *Registry) SetFileTotal(fileID int64, total int64) {
-	r.file(fileID).total.Store(total)
+	r.updateFile(fileID, func(f *fileEntry) { f.total.Store(total) })
 }
 
 // RemoveFile drops fileID's entry; the file finished and Snapshot should no

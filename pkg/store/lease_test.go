@@ -29,6 +29,12 @@ func TestRenewLease(t *testing.T) {
 	if err := s.RenewLease(ctx, LeaseFile, fileID, "01JWRONGTOKEN000000000000", until); !errors.Is(err, ErrFenced) {
 		t.Fatalf("RenewLease wrong token err = %v, want ErrFenced", err)
 	}
+	if _, err := s.db.ExecContext(ctx, "UPDATE files SET status = ? WHERE id = ?", string(FileQueued), fileID); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.RenewLease(ctx, LeaseFile, fileID, tok, until); !errors.Is(err, ErrFenced) {
+		t.Fatalf("RenewLease after status change err = %v, want ErrFenced", err)
+	}
 }
 
 func mustFileID(t *testing.T, s *Store, repoID int64, path string) int64 {
