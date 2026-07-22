@@ -12,6 +12,7 @@ Drop-in replacement of `hf download` that:
 - Does not consume 114514G RAM and DoS your disk for so-called "high performance" mode
 - Does not get rewrited in Rust for no reason
 - Has a proper TUI instead of progress bars mixed with partial logs
+- Supports simultaneous downloads from multiple mirrors
 - Can adjust network speed limits on the fly
 - Is end-to-end OTLP traced
 - And performant!
