@@ -46,6 +46,7 @@ type downloadFlags struct {
 	connections    int
 	blockSizeStr   string
 	policyStr      string
+	sourcePrioStr  string
 	references     []string
 	bandwidthStr   string
 	apiIOPS        int64
@@ -106,6 +107,7 @@ func newDownloadCmd() *cobra.Command {
 	fl.IntVar(&f.connections, "hfdl-connections", dfl.Conns, "block connections per file")
 	fl.StringVar(&f.blockSizeStr, "hfdl-block-size", "", "download block size (default: adaptive 4MiB-64MiB)")
 	fl.StringVar(&f.policyStr, "hfdl-upstream-policy", config.BestSpeed.String(), "per-block upstream selection: best-speed|random|round-robin")
+	fl.StringVar(&f.sourcePrioStr, "hfdl-source-priority", "", "transfer source preference when a xet hash exists: xet|cdn (default xet; cdn when $HF_HUB_DISABLE_XET is set)")
 	fl.StringArrayVar(&f.references, "hfdl-reference", nil, "local file/dir to salvage whole-file matches from (repeatable)")
 	fl.StringVar(&f.bandwidthStr, "hfdl-max-bandwidth", "", "global download bandwidth cap (e.g. 500MiB/s; default unlimited)")
 	fl.Int64Var(&f.apiIOPS, "hfdl-api-iops", dfl.APIIOPS, "HF API requests per second")
@@ -196,6 +198,9 @@ func buildPlan(f *downloadFlags, getenv func(string) string) (*downloadPlan, err
 		}
 	}
 	if limits.UpstreamPolicy, err = config.ParseUpstreamPolicy(f.policyStr); err != nil {
+		return nil, err
+	}
+	if limits.SourcePriority, err = config.ResolveSourcePriority(f.sourcePrioStr, getenv); err != nil {
 		return nil, err
 	}
 	if limits.IOMode, err = config.ParseIOMode(f.ioModeStr); err != nil {

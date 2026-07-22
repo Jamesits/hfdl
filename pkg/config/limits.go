@@ -75,6 +75,40 @@ func ParseUpstreamPolicy(s string) (UpstreamPolicy, error) {
 	return BestSpeed, fmt.Errorf("invalid upstream-policy %q: want random|round-robin|best-speed", s)
 }
 
+// SourcePriority selects which transfer source to prefer for a file that a
+// xet hash makes available two ways: xet (content-defined chunk dedup served
+// from the CAS) or cdn (the plain HTTP resolve URL the Hub redirects to its
+// CDN). A file with no xet hash is CDN-only regardless, so PreferXet still
+// falls back to the CDN there; PreferCDN forces the CDN even when a xet hash
+// exists. The zero value is PreferXet so a zero Limits keeps the historical
+// "xet when available" behaviour.
+type SourcePriority int
+
+const (
+	PreferXet SourcePriority = iota // xet when available, else cdn (default)
+	PreferCDN                       // always cdn, even when a xet hash exists
+)
+
+func (s SourcePriority) String() string {
+	switch s {
+	case PreferXet:
+		return "xet"
+	case PreferCDN:
+		return "cdn"
+	}
+	return "unknown"
+}
+
+func ParseSourcePriority(s string) (SourcePriority, error) {
+	switch s {
+	case "xet":
+		return PreferXet, nil
+	case "cdn":
+		return PreferCDN, nil
+	}
+	return PreferXet, fmt.Errorf("invalid source-priority %q: want xet|cdn", s)
+}
+
 // Limits is the hot-settable operator constraint set shared by sched,
 // throttle and transfer. It is updated live via sched.Manager.SetLimits and
 // persisted to the store kv table so restarts keep the last setting.
@@ -97,6 +131,7 @@ type Limits struct {
 	CheckpointInterval time.Duration // durable progress cadence
 	IOMode             IOMode
 	UpstreamPolicy     UpstreamPolicy
+	SourcePriority     SourcePriority // xet vs cdn transfer source preference
 }
 
 // bandwidthMinBurst floors the bandwidth bucket burst when a limit is set: a
@@ -137,6 +172,7 @@ func DefaultLimits() Limits {
 		CheckpointInterval: 30 * time.Second,
 		IOMode:             IOBuffered,
 		UpstreamPolicy:     BestSpeed,
+		SourcePriority:     PreferXet,
 	}
 }
 

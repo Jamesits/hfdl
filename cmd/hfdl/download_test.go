@@ -178,6 +178,7 @@ func TestBuildPlanFlagEnvMatrix(t *testing.T) {
 				f.ioBufferStr = "256MiB"
 				f.checkpointIntv = time.Minute
 				f.policyStr = "round-robin"
+				f.sourcePrioStr = "cdn"
 				f.ioModeStr = "direct"
 			},
 			check: func(t *testing.T, p *downloadPlan) {
@@ -205,6 +206,9 @@ func TestBuildPlanFlagEnvMatrix(t *testing.T) {
 				}
 				if l.UpstreamPolicy != config.RoundRobin || l.IOMode != config.IODirect {
 					t.Fatalf("policy/iomode = %v/%v", l.UpstreamPolicy, l.IOMode)
+				}
+				if l.SourcePriority != config.PreferCDN {
+					t.Fatalf("source-priority = %v", l.SourcePriority)
 				}
 			},
 		},
@@ -284,6 +288,25 @@ func TestBuildPlanFlagEnvMatrix(t *testing.T) {
 			check: func(t *testing.T, p *downloadPlan) {
 				if p.cli.StateDB != "/tmp/custom/state.db" {
 					t.Fatalf("stateDB = %q", p.cli.StateDB)
+				}
+			},
+		},
+		{
+			name: "HF_HUB_DISABLE_XET forces cdn",
+			env:  map[string]string{"HF_HUB_DISABLE_XET": "1"},
+			check: func(t *testing.T, p *downloadPlan) {
+				if p.limits.SourcePriority != config.PreferCDN {
+					t.Fatalf("source-priority = %v", p.limits.SourcePriority)
+				}
+			},
+		},
+		{
+			name:   "explicit --hfdl-source-priority beats HF_HUB_DISABLE_XET",
+			mutate: func(f *downloadFlags) { f.sourcePrioStr = "xet" },
+			env:    map[string]string{"HF_HUB_DISABLE_XET": "1"},
+			check: func(t *testing.T, p *downloadPlan) {
+				if p.limits.SourcePriority != config.PreferXet {
+					t.Fatalf("source-priority = %v", p.limits.SourcePriority)
 				}
 			},
 		},
@@ -408,6 +431,7 @@ func TestBuildPlanErrors(t *testing.T) {
 		{"bad stall-min-bytes", func(f *downloadFlags) { f.stallMinStr = "lots" }},
 		{"bad io-buffer", func(f *downloadFlags) { f.ioBufferStr = "-1q" }},
 		{"bad upstream-policy", func(f *downloadFlags) { f.policyStr = "chaos" }},
+		{"bad source-priority", func(f *downloadFlags) { f.sourcePrioStr = "torrent" }},
 		{"bad io-mode", func(f *downloadFlags) { f.ioModeStr = "turbo" }},
 		{"bad log-level", func(f *downloadFlags) { f.logLevelStr = "trace" }},
 		{"api-iops zero", func(f *downloadFlags) { f.apiIOPS = 0 }},

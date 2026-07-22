@@ -227,10 +227,12 @@ func (m *Manager) startDownload(ctx context.Context, f *store.File) (launched bo
 		return false, nil
 	}
 
-	// Source selection: xet-backed when the tree carried a xet hash and a
-	// xet client is wired, else multi-upstream http.
+	// Source selection: xet-backed when the tree carried a xet hash, a xet
+	// client is wired, and the operator did not force the CDN
+	// (--hfdl-source-priority=cdn); else multi-upstream http. A file with no
+	// xet hash is CDN-only regardless of the preference.
 	var src transfer.BlockSource
-	if f.XetHash != "" && m.cfg.Xet != nil {
+	if limits.SourcePriority == config.PreferXet && f.XetHash != "" && m.cfg.Xet != nil {
 		xs, err := m.prepareXetSource(ctx, f, repo)
 		if err != nil {
 			m.handleXetPrepareError(ctx, f, tok, err)

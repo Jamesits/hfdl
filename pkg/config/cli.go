@@ -102,6 +102,28 @@ func Offline(getenv func(string) string) bool {
 	return truthy(getenv("HF_HUB_OFFLINE"))
 }
 
+// DisableXet reports HF_HUB_DISABLE_XET truthiness (huggingface_hub parity):
+// when set, xet transfers are disabled and every file is fetched from the CDN.
+// It is the env-level equivalent of --hfdl-source-priority=cdn; an explicit
+// flag still wins (see ResolveSourcePriority).
+func DisableXet(getenv func(string) string) bool {
+	return truthy(getenv("HF_HUB_DISABLE_XET"))
+}
+
+// ResolveSourcePriority combines the --hfdl-source-priority flag with the
+// HF_HUB_DISABLE_XET env var, mirroring the flag-beats-env precedence of the
+// other resolvers here: an explicitly set flag wins; otherwise
+// HF_HUB_DISABLE_XET forces the CDN; otherwise xet is preferred when available.
+func ResolveSourcePriority(flag string, getenv func(string) string) (SourcePriority, error) {
+	if flag != "" {
+		return ParseSourcePriority(flag)
+	}
+	if DisableXet(getenv) {
+		return PreferCDN, nil
+	}
+	return PreferXet, nil
+}
+
 // TraceFCIODetail reports HFDL_TRACE_FCIO_DETAIL truthiness: the opt-in gate
 // for fine-grained fcio.read/fcio.fsync spans. Off by default because those
 // spans are per-file-pass diagnostic detail whose volume is unwanted in

@@ -132,6 +132,35 @@ func TestParseEnums(t *testing.T) {
 	if _, err := ParseUpstreamPolicy("chaos"); err == nil {
 		t.Fatal("bad policy accepted")
 	}
+	if s, err := ParseSourcePriority("cdn"); err != nil || s != PreferCDN {
+		t.Fatalf("source-priority: %v %v", s, err)
+	}
+	if s, err := ParseSourcePriority("xet"); err != nil || s != PreferXet {
+		t.Fatalf("source-priority: %v %v", s, err)
+	}
+	if _, err := ParseSourcePriority("torrent"); err == nil {
+		t.Fatal("bad source-priority accepted")
+	}
+	noenv := func(string) string { return "" }
+	disabled := func(k string) string {
+		if k == "HF_HUB_DISABLE_XET" {
+			return "1"
+		}
+		return ""
+	}
+	// flag empty + no env → default xet; env disables → cdn; explicit flag wins.
+	if s, err := ResolveSourcePriority("", noenv); err != nil || s != PreferXet {
+		t.Fatalf("resolve default: %v %v", s, err)
+	}
+	if s, err := ResolveSourcePriority("", disabled); err != nil || s != PreferCDN {
+		t.Fatalf("resolve HF_HUB_DISABLE_XET: %v %v", s, err)
+	}
+	if s, err := ResolveSourcePriority("xet", disabled); err != nil || s != PreferXet {
+		t.Fatalf("resolve flag beats env: %v %v", s, err)
+	}
+	if _, err := ResolveSourcePriority("torrent", noenv); err == nil {
+		t.Fatal("bad source-priority flag accepted")
+	}
 	if l, err := ParseLogLevel("warn"); err != nil || l != 4 {
 		t.Fatalf("level: %v %v", l, err)
 	}
