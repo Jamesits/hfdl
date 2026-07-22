@@ -7,7 +7,6 @@ import (
 	"os"
 	"path/filepath"
 	"sync/atomic"
-	"unsafe"
 )
 
 // ioTier is the resolved per-file tier (distinct from the requested IOTier:
@@ -112,27 +111,6 @@ type UnalignedError struct {
 func (e *UnalignedError) Error() string {
 	return fmt.Sprintf("fcio: unaligned direct IO on %s: off=%d len=%d align=%d (bad %s)",
 		e.Path, e.Off, e.Len, e.Align, e.Cause)
-}
-
-// checkAligned enforces the direct-tier alignment rule on offset, length and
-// buffer address (FastCopy minSectorSize / ALIGN_SIZE analog).
-func checkAligned(path string, p []byte, off, align int64) error {
-	if len(p) == 0 {
-		return nil
-	}
-	if align <= 0 {
-		return &UnalignedError{Path: path, Off: off, Len: len(p), Align: align, Cause: "alignment unknown"}
-	}
-	if off%align != 0 {
-		return &UnalignedError{Path: path, Off: off, Len: len(p), Align: align, Cause: "offset"}
-	}
-	if int64(len(p))%align != 0 {
-		return &UnalignedError{Path: path, Off: off, Len: len(p), Align: align, Cause: "length"}
-	}
-	if uintptr(unsafe.Pointer(&p[0]))%uintptr(align) != 0 {
-		return &UnalignedError{Path: path, Off: off, Len: len(p), Align: align, Cause: "buffer address"}
-	}
-	return nil
 }
 
 func writeFullAt(w io.WriterAt, p []byte, off int64) error {

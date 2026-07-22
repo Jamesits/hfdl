@@ -4,7 +4,8 @@ import (
 	"context"
 	"fmt"
 	"log/slog"
-	"sync"
+
+	"go.opentelemetry.io/otel/attribute"
 )
 
 // IOTier selects the storage/IO tier requested from the engine: fadvise is
@@ -67,30 +68,26 @@ type Hints struct {
 	Sequential bool
 }
 
-// Engine opens files on the requested IO tier and owns per-volume
-// capability decisions (in-memory over the injected CapsCache).
-type Engine struct {
+// engineCommon holds the platform-independent engine state. Engine embeds it
+// and adds the per-OS capability state (see engine_{linux,windows,other}.go).
+// Defining Engine per-platform — rather than carrying every OS's fields on one
+// shared struct — is what keeps a field a given OS never touches from tripping
+// the unused-field linter on that OS, without a shared struct of dead fields.
+type engineCommon struct {
 	log  *slog.Logger
 	caps CapsCache // nil ok: decisions then live only for the process
 	mode IOTier
-
-	vols sync.Map // "volcaps:<dev>" -> *volCaps (linux direct tier)
 
 	// pool sources ReadAll scratch when set, so verify/copy reads back-pressure
 	// against the same --io-buffer budget as writes. nil ⇒ ReadAll falls back
 	// to private page-aligned scratch. Injected via SetPool (cmd wires the
 	// engine and pool it created together); the engine never builds its own.
 	pool *Pool
-
-	// fallocateFn overrides the fallocate syscall used by Open; nil uses the
-	// OS call. Test seam for the ENOSYS degradation to the no-preallocation
-	// tier.
-	fallocateFn func(fd int, size int64) error
 }
 
 // NewEngine builds an engine on the given tier. caps may be nil.
 func NewEngine(log *slog.Logger, caps CapsCache, mode IOTier) *Engine {
-	return &Engine{log: log, caps: caps, mode: mode}
+	return &Engine{engineCommon: engineCommon{log: log, caps: caps, mode: mode}}
 }
 
 // SetPool injects the shared buffer pool used to source ReadAll scratch, so
@@ -162,6 +159,11 @@ func (e *Engine) ReadAll(ctx context.Context, f *File, fn func(p []byte, off int
 	if size == 0 {
 		return nil
 	}
+	ctx, sp := startDetailSpan(ctx, "fcio.read",
+		attribute.String("path", f.path),
+		attribute.Int64("size", size),
+	)
+	defer endDetailSpan(sp)
 	f.declareSequential()
 	if f.tier == tierDirect {
 		return e.readAllDirect(ctx, f, size, fn)
