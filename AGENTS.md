@@ -13,6 +13,7 @@ High-speed Hugging Face downloader.
 - Keep different logical segments of the same package in different files
 - Avoid using `context.Background()`, `context.TODO()` or `nil` context in packages, use the context from caller
 - Use `log/slog` for logging; if logged arguments contain slices, wrap it with `logging.JSONValue` to keep spaces visible
+- Trace end-to-end with OpenTelemetry spans
 - Common hookable types e.g. logger, context and `http.Client` must always be passed from upstream to downstream; downstream packages should never create internal ones
 - Keep `cmd/*` lean, organize features into packages
 - Define magic literals as consts/vars

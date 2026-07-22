@@ -257,7 +257,7 @@ func buildPlan(f *downloadFlags, getenv func(string) string) (*downloadPlan, err
 // runDownload executes the download command: build plan → wire the process
 // in bootstrap order (stderr handler, open store, attach DB/OTLP sinks)
 // → submit job → TUI or plain progress → final path.
-func runDownload(ctx context.Context, f *downloadFlags, getenv func(string) string) error {
+func runDownload(ctx context.Context, f *downloadFlags, getenv func(string) string) (err error) {
 	p, err := buildPlan(f, getenv)
 	if err != nil {
 		return err
@@ -274,17 +274,28 @@ func runDownload(ctx context.Context, f *downloadFlags, getenv func(string) stri
 	// leg at all.
 	useTUI := !p.quiet && !p.noTUI && stdoutIsTTY()
 
-	a, err := wireDownload(ctx, p, getenv, !useTUI && !p.quiet)
+	// Bootstrap telemetry first (root logger + OTel providers) so the tracer
+	// exists before the hfdl.run span opens. Component wiring runs afterwards
+	// under that span, giving one trace that spans the whole invocation.
+	a, err := wireTelemetry(ctx, p, getenv, !useTUI && !p.quiet)
 	if err != nil {
 		return err
 	}
 	defer a.close(ctx)
 
-	// hfdl.run root span: sched.job / transfer.file spans nest under it
-	// via ctx. Registered after a.close so its End runs first (defer LIFO),
-	// ending the span before the provider shutdown flushes it.
+	// hfdl.run root span: component wiring, sched.job and transfer.file spans
+	// all nest under it via ctx. Registered after a.close so its End runs first
+	// (defer LIFO), ending the span before the provider shutdown flushes it.
 	ctx, endRun := startRunSpan(ctx, a.prov, p)
-	defer endRun()
+	// endRun records the named return err on the hfdl.run span before ending
+	// it; read at defer time so it captures whichever return path fires.
+	defer func() { endRun(err) }()
+
+	// Component wiring (store migrations, cache open, filesystem probe, manager)
+	// is now traced under hfdl.run.
+	if err := a.wireComponents(ctx, p, getenv, newManager); err != nil {
+		return err
+	}
 
 	if err := a.submit(ctx, p); err != nil {
 		return err

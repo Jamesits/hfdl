@@ -25,6 +25,7 @@ import (
 	"github.com/jamesits/hfdl/pkg/verify"
 	"github.com/jamesits/hfdl/pkg/xet"
 	"go.opentelemetry.io/otel/attribute"
+	"go.opentelemetry.io/otel/codes"
 	"go.opentelemetry.io/otel/trace"
 )
 
@@ -65,7 +66,7 @@ type manager interface {
 	DryRunReport() []sched.DryRunEntry
 }
 
-// managerFactory builds the manager; wireDownload uses newManager, tests
+// managerFactory builds the manager; wireComponents uses newManager, tests
 // override it.
 type managerFactory func(cfg sched.ManagerConfig) manager
 
@@ -76,7 +77,8 @@ func newManager(cfg sched.ManagerConfig) manager { return sched.NewManager(cfg) 
 // without re-declaring the shape.
 type schedSnapshot = sched.Stats
 
-// wireApp holds everything constructed by wireDownload, in teardown order.
+// wireApp holds everything constructed while wiring the process, in teardown
+// order.
 type wireApp struct {
 	log     *slog.Logger
 	handler *logging.Handler
@@ -128,17 +130,17 @@ func (a *wireApp) close(ctx context.Context) {
 	}
 }
 
-// wireDownload builds the whole process in bootstrap order: stderr handler
-// first, then open the store, then attach the DB and OTLP log sinks.
+// wireTelemetry does the untraceable bootstrap: the root slog fan-out and the
+// OTel providers. It is deliberately the minimum needed to obtain a live
+// tracer, because this is where the tracer itself is built — no span can wrap
+// it. Everything downstream is built by wireComponents, which runDownload runs
+// under the hfdl.run span so the whole invocation is traced end to end.
+//
 // stderrText=false silences the stderr leg entirely for TUI mode — a stray
-// write would corrupt the bubbletea screen; ring, DB and OTLP
-// sinks are unaffected.
-func wireDownload(ctx context.Context, p *downloadPlan, getenv func(string) string, stderrText bool) (*wireApp, error) {
-	return wireDownloadWith(ctx, p, getenv, newManager, stderrText)
-}
-
-func wireDownloadWith(ctx context.Context, p *downloadPlan, getenv func(string) string, mk managerFactory, stderrText bool) (*wireApp, error) {
-	// 1. Root slog fan-out: stderr text (nil in TUI mode) + ring.
+// write would corrupt the bubbletea screen; ring, DB and OTLP sinks are
+// unaffected.
+func wireTelemetry(ctx context.Context, p *downloadPlan, getenv func(string) string, stderrText bool) (*wireApp, error) {
+	// Root slog fan-out: stderr text (nil in TUI mode) + ring.
 	var stderr *os.File
 	if stderrText {
 		stderr = os.Stderr
@@ -149,11 +151,38 @@ func wireDownloadWith(ctx context.Context, p *downloadPlan, getenv func(string) 
 
 	app := &wireApp{log: log, handler: handler, ring: ring}
 
-	// 2. State store (exclusive process lock, migrations, WAL).
+	// Telemetry (env-only; disabled → noop providers). Built before the store
+	// so the hfdl.run span opened next can wrap the store/cache/probe wiring.
+	prov := otel.Noop()
+	if otel.Enabled(getenv) {
+		setup, err := otel.Setup(ctx, getenv, config.VersionString(), &metricsSource{app: app}, log)
+		if err != nil {
+			_ = handler.Close(ctx)
+			return nil, fmt.Errorf("otel setup: %w", err)
+		}
+		prov = setup
+	}
+	app.prov = prov
+	// The OTLP log bridge is attached ahead of the DB sink (wireComponents):
+	// they are independent fan-out sinks, each with its own replay-dedup
+	// horizon, so ordering between them is free.
+	handler.AttachSlog(prov.SlogBridge())
+	return app, nil
+}
+
+// wireComponents builds everything downstream of the tracer: the state store,
+// the DB log sink, the shared HTTP client and Hub clients, the IO engine, the
+// blob cache/verifier/downloader, the xet client and the queue manager. When
+// runDownload calls it under the hfdl.run span, the store migrations, cache
+// open and filesystem probe all nest under that span. On failure it returns
+// the error without teardown — the caller owns app.close.
+func (app *wireApp) wireComponents(ctx context.Context, p *downloadPlan, getenv func(string) string, mk managerFactory) error {
+	log, prov, handler := app.log, app.prov, app.handler
+
+	// 1. State store (exclusive process lock, migrations, WAL).
 	st, err := store.Open(ctx, p.cli.StateDB)
 	if err != nil {
-		_ = handler.Close(ctx)
-		return nil, err
+		return err
 	}
 	app.store = st
 	// Prune retained logs BEFORE attaching the sink: AttachDB kicks off the
@@ -165,23 +194,11 @@ func wireDownloadWith(ctx context.Context, p *downloadPlan, getenv func(string) 
 	}
 	handler.AttachDB(ctx, st)
 
-	// 3. Telemetry (env-only; disabled → noop providers).
-	prov := otel.Noop()
-	if otel.Enabled(getenv) {
-		prov, err = otel.Setup(ctx, getenv, config.VersionString(), &metricsSource{app: app}, log)
-		if err != nil {
-			app.close(ctx)
-			return nil, fmt.Errorf("otel setup: %w", err)
-		}
-	}
-	app.prov = prov
-	handler.AttachSlog(prov.SlogBridge())
-
-	// 4. Shared HTTP client: tuned transport, otelhttp on top, no global
+	// 2. Shared HTTP client: tuned transport, otelhttp on top, no global
 	// timeout (response timeouts live on the hfapi client).
 	hc := &http.Client{Transport: prov.HTTPTransport(newTransport())}
 
-	// 5. Hub API clients, one per endpoint (first = primary; the rest are
+	// 3. Hub API clients, one per endpoint (first = primary; the rest are
 	// payload mirrors — CAS tokens always come from the primary Hub endpoint).
 	etagTimeout := config.ETagTimeout(getenv)
 	downloadTimeout := config.DownloadTimeout(getenv)
@@ -197,7 +214,7 @@ func wireDownloadWith(ctx context.Context, p *downloadPlan, getenv func(string) 
 	}
 	primary := clients[p.endpoints[0]]
 
-	// 6. IO engine, buffer pool, volume exclusion set.
+	// 4. IO engine, buffer pool, volume exclusion set.
 	// HFDL_TRACE_FCIO_DETAIL gates the fine-grained fcio.read/fcio.fsync spans
 	// (process-global; noop unless telemetry is also enabled).
 	fcio.SetTraceDetail(config.TraceFCIODetail(getenv))
@@ -212,11 +229,10 @@ func wireDownloadWith(ctx context.Context, p *downloadPlan, getenv func(string) 
 	engine.SetPool(pool)
 	volumes := fcio.NewVolumeSet()
 
-	// 7. Blob cache + verifier + downloader.
+	// 5. Blob cache + verifier + downloader.
 	blobs, err := cache.OpenStore(ctx, p.cacheDir, engine, log)
 	if err != nil {
-		app.close(ctx)
-		return nil, err
+		return err
 	}
 	bwBurst := config.BandwidthBurst(p.limits.MaxBandwidthBps)
 	// Bandwidth starts full so the first chunk transfers without an artificial
@@ -255,7 +271,7 @@ func wireDownloadWith(ctx context.Context, p *downloadPlan, getenv func(string) 
 		Prov:               prov,
 	})
 
-	// 8. Xet client. CAS tokens are per Hub endpoint; endpoints beyond the
+	// 6. Xet client. CAS tokens are per Hub endpoint; endpoints beyond the
 	// first are payload mirrors, so the TokenSource closes over the primary.
 	xcfg := xet.Config{CacheMaxBytes: xet.CacheMaxBytesFromEnv(getenv)}
 	if v := getenv("HF_XET_ENDPOINT"); v != "" {
@@ -270,7 +286,7 @@ func wireDownloadWith(ctx context.Context, p *downloadPlan, getenv func(string) 
 
 	installer := cache.NewInstaller(blobs, engine, volumes, duty, log, prov)
 
-	// 9. Queue manager.
+	// 7. Queue manager.
 	mgr := mk(sched.ManagerConfig{
 		Store:         st,
 		Clients:       clients,
@@ -295,6 +311,22 @@ func wireDownloadWith(ctx context.Context, p *downloadPlan, getenv func(string) 
 		DryRun:        p.cli.DryRun,
 	})
 	app.manager = mgr
+	return nil
+}
+
+// wireDownloadWith composes the two wiring phases for callers that do not
+// interpose the hfdl.run span (tests). runDownload calls the phases directly
+// so the span wraps wireComponents; here they run back to back and a
+// component failure tears down the telemetry already built.
+func wireDownloadWith(ctx context.Context, p *downloadPlan, getenv func(string) string, mk managerFactory, stderrText bool) (*wireApp, error) {
+	app, err := wireTelemetry(ctx, p, getenv, stderrText)
+	if err != nil {
+		return nil, err
+	}
+	if err := app.wireComponents(ctx, p, getenv, mk); err != nil {
+		app.close(ctx)
+		return nil, err
+	}
 	return app, nil
 }
 
@@ -321,13 +353,16 @@ func (a *wireApp) submit(ctx context.Context, p *downloadPlan) error {
 
 func (a *wireApp) runManager(ctx context.Context) error { return a.manager.Run(ctx) }
 
-// startRunSpan opens the hfdl.run root span on the injected cmd tracer:
-// every downstream sched.job / transfer.file span nests under it through ctx.
-// Attributes are the coarse invocation shape only (repo, revision, dest_mode,
-// limits) — no per-file detail. When telemetry is disabled the tracer is the
-// noop and this is allocation-cheap. Returns the span-carrying ctx and an end
-// func the caller defers.
-func startRunSpan(ctx context.Context, prov *otel.Providers, p *downloadPlan) (context.Context, func()) {
+// startRunSpan opens the hfdl.run root span on the injected cmd tracer. It is
+// opened before component wiring (wireComponents) so that store migrations,
+// cache open and the filesystem probe — and every downstream sched.job /
+// transfer.file span — nest under it through ctx, giving one trace for the
+// whole invocation. Attributes are the coarse invocation shape only (repo,
+// revision, dest_mode, limits) — no per-file detail. When telemetry is
+// disabled the tracer is the noop and this is allocation-cheap. Returns the
+// span-carrying ctx and an end func the caller defers with the run's terminal
+// error (nil on success).
+func startRunSpan(ctx context.Context, prov *otel.Providers, p *downloadPlan) (context.Context, func(error)) {
 	destMode := destModeCache
 	if p.cli.LocalDir != "" {
 		destMode = destModeLocalDir
@@ -340,7 +375,17 @@ func startRunSpan(ctx context.Context, prov *otel.Providers, p *downloadPlan) (c
 		attribute.Int("limits.connections", p.limits.Conns),
 		attribute.Int64("limits.max_bandwidth_bps", p.limits.MaxBandwidthBps),
 	))
-	return ctx, func() { span.End() }
+	// Record the invocation's terminal error on the root span so a failed or
+	// interrupted run surfaces as an errored hfdl.run span (covering wiring,
+	// submit and the manager run alike), then end it. err is the caller's
+	// final return value, read at defer time.
+	return ctx, func(err error) {
+		if err != nil {
+			span.RecordError(err)
+			span.SetStatus(codes.Error, err.Error())
+		}
+		span.End()
+	}
 }
 
 // runTUI drives the dashboard; the manager runs concurrently on the main
