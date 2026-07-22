@@ -45,6 +45,7 @@ Differences to `hf download`:
 
 <details>
 <summary>Click to expand</summary>
+
 [`hf` documentation](https://huggingface.co/docs/huggingface_hub/en/package_reference/environment_variables)
 
 Generic:
