@@ -172,7 +172,7 @@ func TestIdentityMismatchAfterPin(t *testing.T) {
 		t.Fatal("bad mirror not excluded")
 	}
 	// Every later Open must come from the good mirror.
-	for i := 0; i < 4; i++ {
+	for i := range 4 {
 		body, err := src.Open(ctx, 1000, 100)
 		if err != nil {
 			t.Fatalf("open %d: %v", i, err)
@@ -261,8 +261,7 @@ func TestOpen416(t *testing.T) {
 	task.BlobID = "blob-s"
 	src := newTestHTTPSource(task, testSeed(6))
 	_, err := src.Open(t.Context(), 5000, 100) // out of range
-	var rns *rangeNotSatisfiableError
-	if !errors.As(err, &rns) {
+	if _, ok := errors.AsType[*rangeNotSatisfiableError](err); !ok {
 		t.Fatalf("got %v, want *rangeNotSatisfiableError", err)
 	}
 }

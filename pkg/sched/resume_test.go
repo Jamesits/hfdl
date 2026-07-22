@@ -78,7 +78,7 @@ func TestResumeAfterCancel(t *testing.T) {
 	if err := m2.Run(t.Context()); err != nil {
 		t.Fatalf("second Run: %v", err)
 	}
-	got, err := os.ReadFile(env.installedSnapshotPath("org/repo", "main", hub.sha, "big.bin"))
+	got, err := os.ReadFile(env.installedSnapshotPath("org/repo", hub.sha, "big.bin"))
 	if err != nil {
 		t.Fatalf("read installed: %v", err)
 	}
@@ -140,7 +140,7 @@ func TestCorruptProgressSizeMismatch(t *testing.T) {
 	if !cap.has(slog.LevelWarn, "progress blob rejected by transfer") {
 		t.Error("expected the corrupt-progress warn (transfer rejection path not taken)")
 	}
-	got, err := os.ReadFile(env.installedSnapshotPath("org/repo", "main", hub.sha, "c.bin"))
+	got, err := os.ReadFile(env.installedSnapshotPath("org/repo", hub.sha, "c.bin"))
 	if err != nil {
 		t.Fatalf("read installed: %v", err)
 	}

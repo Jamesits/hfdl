@@ -71,7 +71,7 @@ func bg4Regroup(g []byte) []byte {
 	g3 := g[s0+s1+s2:]
 
 	out := make([]byte, n)
-	for i := 0; i < split; i++ {
+	for i := range split {
 		out[4*i] = g0[i]
 		out[4*i+1] = g1[i]
 		out[4*i+2] = g2[i]

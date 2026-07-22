@@ -41,8 +41,7 @@ func TestSafeJoin(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			got, err := SafeJoin(root, tc.p)
 			if tc.wantErr {
-				var perr *PathSafetyError
-				if !errors.As(err, &perr) {
+				if _, ok := errors.AsType[*PathSafetyError](err); !ok {
 					t.Fatalf("SafeJoin(%q) err = %v, want *PathSafetyError", tc.p, err)
 				}
 				return
@@ -85,8 +84,7 @@ func TestSafeJoinContentLeafSymlinkEscapeRejected(t *testing.T) {
 		t.Fatal(err)
 	}
 	_, err := SafeJoinContent(root, "leaf")
-	var pse *PathSafetyError
-	if !errors.As(err, &pse) {
+	if _, ok := errors.AsType[*PathSafetyError](err); !ok {
 		t.Fatalf("SafeJoinContent(escaping leaf symlink) err = %v, want PathSafetyError", err)
 	}
 }

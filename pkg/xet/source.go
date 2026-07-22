@@ -128,14 +128,8 @@ func (s *Source) Boundaries(missing []transfer.Interval, blockSize int64) []tran
 	var out []transfer.Interval
 	var prevEnd int64 // end of the previous expanded interval; leading-edge snap floor
 	for _, m := range missing {
-		start := recon.termStartAt(m.Start)
-		if start < prevEnd {
-			start = prevEnd
-		}
-		end := recon.termEndAt(m.End)
-		if end > s.size {
-			end = s.size
-		}
+		start := max(recon.termStartAt(m.Start), prevEnd)
+		end := min(recon.termEndAt(m.End), s.size)
 		for p := start; p < end; {
 			edge := end
 			if te := recon.nextTermEdge(p); te > p && te < edge {
@@ -514,8 +508,7 @@ func (c *Client) getSignedRange(ctx context.Context, e fetchRange) (b []byte, fo
 
 func sanitizeSignedURLError(err error, rawURL string) error {
 	cause := err
-	var uerr *url.Error
-	if errors.As(err, &uerr) {
+	if uerr, ok := errors.AsType[*url.Error](err); ok {
 		cause = uerr.Err
 	}
 	u, parseErr := url.Parse(rawURL)

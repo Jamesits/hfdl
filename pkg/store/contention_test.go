@@ -105,7 +105,7 @@ func TestBusySnapshotContention(t *testing.T) {
 
 	// Block workers: lease one block, then complete or requeue it (50/50
 	// churn keeps the write lock hot and snapshots contested).
-	for w := 0; w < workers; w++ {
+	for w := range workers {
 		wg.Add(1)
 		go func(w int) {
 			defer wg.Done()
@@ -144,10 +144,8 @@ func TestBusySnapshotContention(t *testing.T) {
 
 	// Transitioners hammer the fenced downloading→downloaded tx the whole
 	// time; exactly one wins, the rest see live leases or fencing — never busy.
-	for w := 0; w < 2; w++ {
-		wg.Add(1)
-		go func() {
-			defer wg.Done()
+	for range 2 {
+		wg.Go(func() {
 			for done.Load() < nblocks && !transitioned.Load() {
 				err := s.TransitionFile(ctx, fileID, fileTok, FileDownloading, FileDownloaded, nil)
 				switch {
@@ -161,7 +159,7 @@ func TestBusySnapshotContention(t *testing.T) {
 					return
 				}
 			}
-		}()
+		})
 	}
 
 	wg.Wait()
@@ -193,7 +191,7 @@ func TestBusySnapshotContention(t *testing.T) {
 		t.Fatalf("LeaseVerify: %v", err)
 	}
 	var stop atomic.Bool
-	for w := 0; w < 4; w++ {
+	for w := range 4 {
 		wg.Add(1)
 		go func(w int) {
 			defer wg.Done()

@@ -202,8 +202,7 @@ func TestBG4RoundTrip(t *testing.T) {
 // TestDecodeChunkBadScheme ensures unknown scheme ids are typed errors.
 func TestDecodeChunkBadScheme(t *testing.T) {
 	_, err := decodeChunk("aa", chunkHeader{scheme: 9, unpackedLen: 1}, []byte{0})
-	var de *DataError
-	if !errors.As(err, &de) {
+	if _, ok := errors.AsType[*DataError](err); !ok {
 		t.Fatalf("want DataError, got %v", err)
 	}
 }

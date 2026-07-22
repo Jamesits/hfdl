@@ -359,8 +359,7 @@ func (m *Manager) tryVerify(ctx context.Context) (bool, error) {
 			}
 			return true, nil
 		}
-		var mm *verify.MismatchError
-		if errors.As(verr, &mm) {
+		if _, ok := errors.AsType[*verify.MismatchError](verr); ok {
 			// Genuine hash mismatch: the bytes are wrong. Count it toward the
 			// 2-strike budget (FailVerify resets the blocks and requeues, or
 			// errors the file at the bound).

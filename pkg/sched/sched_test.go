@@ -66,7 +66,7 @@ func TestHappyPath(t *testing.T) {
 		t.Errorf("refs/main = %q, want %q", sha, hub.sha)
 	}
 	for path, want := range files {
-		final := env.installedSnapshotPath("org/repo", "main", hub.sha, path)
+		final := env.installedSnapshotPath("org/repo", hub.sha, path)
 		target, err := os.Readlink(final)
 		if err != nil {
 			t.Fatalf("readlink %s: %v (want symlink)", final, err)
@@ -132,7 +132,7 @@ func TestExplicitFilenames(t *testing.T) {
 	if got := env.fileStatus(t, "a.txt"); got != string(store.FileCached) {
 		t.Errorf("a.txt status = %s, want cached", got)
 	}
-	if _, err := os.Stat(env.installedSnapshotPath("org/repo", "main", hub.sha, "b.txt")); !os.IsNotExist(err) {
+	if _, err := os.Stat(env.installedSnapshotPath("org/repo", hub.sha, "b.txt")); !os.IsNotExist(err) {
 		t.Errorf("b.txt installed but was not selected")
 	}
 	if got := hub.resolveHits("b.txt"); got != 0 {
@@ -165,7 +165,7 @@ func TestIncludeExcludeFnmatch(t *testing.T) {
 		if got := env.fileStatus(t, p); got != string(store.FileCached) {
 			t.Errorf("%s status = %s, want cached", p, got)
 		}
-		if _, err := os.Stat(env.installedSnapshotPath("org/repo", "main", hub.sha, p)); err != nil {
+		if _, err := os.Stat(env.installedSnapshotPath("org/repo", hub.sha, p)); err != nil {
 			t.Errorf("%s not installed: %v", p, err)
 		}
 	}

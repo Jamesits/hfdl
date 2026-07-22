@@ -37,7 +37,7 @@ func TestSalvageWholeFile(t *testing.T) {
 	if got := env.fileStatus(t, "m.bin"); got != string(store.FileCached) {
 		t.Errorf("file status = %s, want cached", got)
 	}
-	got, err := os.ReadFile(env.installedSnapshotPath("org/repo", "main", hub.sha, "m.bin"))
+	got, err := os.ReadFile(env.installedSnapshotPath("org/repo", hub.sha, "m.bin"))
 	if err != nil {
 		t.Fatalf("read installed: %v", err)
 	}
@@ -118,7 +118,7 @@ func TestSalvageCorruptReference(t *testing.T) {
 	if err := <-runErr; err != nil {
 		t.Fatalf("Run: %v", err)
 	}
-	got, err := os.ReadFile(env.installedSnapshotPath("org/repo", "main", hub.sha, "m.bin"))
+	got, err := os.ReadFile(env.installedSnapshotPath("org/repo", hub.sha, "m.bin"))
 	if err != nil {
 		t.Fatalf("read installed: %v", err)
 	}

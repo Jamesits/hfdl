@@ -155,10 +155,7 @@ func (m *Manager) setCooldown(ctx context.Context, endpoint, kind string, retryA
 // attempt-derived 3-value cycle) desynchronizes endpoints that hit the same
 // attempt number, avoiding a thundering-herd of simultaneous retries.
 func cooldownBackoff(attempt int) time.Duration {
-	d := time.Second << uint(min(attempt, 9))
-	if d > 5*time.Minute {
-		d = 5 * time.Minute
-	}
+	d := min(time.Second<<uint(min(attempt, 9)), 5*time.Minute)
 	return jittered(d)
 }
 
@@ -242,11 +239,9 @@ func (m *Manager) noteIOErrorAt(ctx context.Context, err error, dir string, dema
 	m.enospcMu.Unlock()
 	m.log.Warn("out of disk space; pausing download and install queues",
 		"err", err, "dir", dir, "demand", demand)
-	m.wg.Add(1)
-	go func() {
-		defer m.wg.Done()
+	m.wg.Go(func() {
 		m.enospcWatcher(ctx)
-	}()
+	})
 	return true
 }
 

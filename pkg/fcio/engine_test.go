@@ -53,10 +53,7 @@ func TestWriteAtReadAtRoundTrip(t *testing.T) {
 		// partition [0,size) into random-sized chunks, shuffled
 		var chunks [][2]int64
 		for off := int64(0); off < size; {
-			n := int64(1 + rng.IntN(slab))
-			if n > size-off {
-				n = size - off
-			}
+			n := min(int64(1+rng.IntN(slab)), size-off)
 			chunks = append(chunks, [2]int64{off, n})
 			off += n
 		}
@@ -79,10 +76,7 @@ func TestWriteAtReadAtRoundTrip(t *testing.T) {
 				break
 			}
 			off := rng.Int64N(size)
-			n := int64(1 + rng.Int64N(size-off))
-			if n > slab {
-				n = slab
-			}
+			n := min(int64(1+rng.Int64N(size-off)), slab)
 			buf, err := pool.Get(ctx)
 			if err != nil {
 				t.Fatalf("case %d pool: %v", i, err)
@@ -124,13 +118,11 @@ func TestWriteUnalignedConcurrentNeighbors(t *testing.T) {
 				p   []byte
 				off int64
 			}{{d0, 0}, {d1, blk}} {
-				wg.Add(1)
-				go func() {
-					defer wg.Done()
+				wg.Go(func() {
 					if err := f.WriteUnaligned(job.p, job.off); err != nil {
 						errs <- err
 					}
-				}()
+				})
 			}
 			wg.Wait()
 			close(errs)

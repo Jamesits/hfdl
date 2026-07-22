@@ -277,16 +277,14 @@ func TestBucketConcurrent(t *testing.T) {
 	var consumed atomic.Int64
 	var wg sync.WaitGroup
 	for range 16 {
-		wg.Add(1)
-		go func() {
-			defer wg.Done()
+		wg.Go(func() {
 			for {
 				if err := b.Wait(ctx, 10); err != nil {
 					return
 				}
 				consumed.Add(10)
 			}
-		}()
+		})
 	}
 	wg.Wait()
 	// generous bounds: burst 1000 + ~300ms*100k/s, minus scheduling slop

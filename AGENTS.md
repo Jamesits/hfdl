@@ -21,6 +21,7 @@ High-speed Hugging Face downloader.
 
 ## System Programming Guide
 - All IO operations with known access pattern (sequentical read/write, metadata access only) should be hinted to the OS
+- File path operations must use `filepath` package, including referencing for current platform path separators
 - Same-file comparison must use OS API instead of fiddling with string based path separator replacements
 
 ## Development
@@ -31,3 +32,4 @@ After code change, verify with:
 - `golangci-lint run`
 - `find . -name "*.go" -not -path "./vendor/*" | xargs gopls check -severity=hint | grep -vE "\[.*(aix|ppc64|js|wasm).*\]$"`
 - `go fmt ./...`
+- `go mod tidy`

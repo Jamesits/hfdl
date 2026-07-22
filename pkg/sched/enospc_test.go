@@ -61,8 +61,7 @@ func TestENOSPCProbeKeepsFailing(t *testing.T) {
 	waitFor(t, "terminal escalation", func() bool {
 		return m.joinedErrors() != nil && !m.Snapshot().ENOSPCPaused
 	})
-	var oos *OutOfSpaceError
-	if !errors.As(m.joinedErrors(), &oos) {
+	if _, ok := errors.AsType[*OutOfSpaceError](m.joinedErrors()); !ok {
 		t.Fatalf("joined errors = %v, want *OutOfSpaceError", m.joinedErrors())
 	}
 	if got := probes.Load(); got < 4 {
@@ -169,8 +168,7 @@ func TestENOSPCDemandScaledProbe(t *testing.T) {
 	waitFor(t, "escalation under quota", func() bool {
 		return m.joinedErrors() != nil && !m.Snapshot().ENOSPCPaused
 	})
-	var oos *OutOfSpaceError
-	if !errors.As(m.joinedErrors(), &oos) {
+	if _, ok := errors.AsType[*OutOfSpaceError](m.joinedErrors()); !ok {
 		t.Fatalf("joined = %v, want OutOfSpaceError", m.joinedErrors())
 	}
 

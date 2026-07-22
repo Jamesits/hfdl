@@ -27,10 +27,7 @@ func (r *rateRing) rotate(nowSec int64) {
 	if nowSec <= r.curSec {
 		return
 	}
-	delta := nowSec - r.curSec
-	if delta > windowSeconds {
-		delta = windowSeconds
-	}
+	delta := min(nowSec-r.curSec, windowSeconds)
 	for k := int64(1); k <= delta; k++ {
 		r.buckets[(r.curSec+k)%windowSeconds] = 0
 	}

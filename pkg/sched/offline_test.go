@@ -101,7 +101,7 @@ func TestOfflineServeFromCacheLayoutFreshDB(t *testing.T) {
 	if totalHits != hitsAfterOnline {
 		t.Errorf("offline mode made %d network requests", totalHits-hitsAfterOnline)
 	}
-	got, err := os.ReadFile(env.installedSnapshotPath("org/repo", "main", hub.sha, "m.bin"))
+	got, err := os.ReadFile(env.installedSnapshotPath("org/repo", hub.sha, "m.bin"))
 	if err != nil {
 		t.Fatalf("read served file: %v", err)
 	}
@@ -123,8 +123,7 @@ func TestOfflineMissTerminal(t *testing.T) {
 	}
 	start := time.Now()
 	err := env.manager.Run(ctx)
-	var offErr *OfflineError
-	if !errors.As(err, &offErr) {
+	if _, ok := errors.AsType[*OfflineError](err); !ok {
 		t.Fatalf("Run = %v, want *OfflineError", err)
 	}
 	if elapsed := time.Since(start); elapsed > 5*time.Second {
@@ -201,8 +200,7 @@ func TestOfflinePartialSnapshot(t *testing.T) {
 		t.Fatalf("offline Submit: %v", err)
 	}
 	err = m.Run(ctx)
-	var offErr *OfflineError
-	if !errors.As(err, &offErr) {
+	if _, ok := errors.AsType[*OfflineError](err); !ok {
 		t.Fatalf("Run = %v, want *OfflineError naming missing.bin", err)
 	}
 	if !bytes.Contains([]byte(err.Error()), []byte("missing.bin")) {
@@ -225,8 +223,7 @@ func TestMissingExplicitFilenameTerminal(t *testing.T) {
 		t.Fatalf("Submit: %v", err)
 	}
 	err = env.manager.Run(ctx)
-	var nr *NotInRepoError
-	if !errors.As(err, &nr) {
+	if _, ok := errors.AsType[*NotInRepoError](err); !ok {
 		t.Fatalf("Run = %v, want *NotInRepoError", err)
 	}
 	if !bytes.Contains([]byte(err.Error()), []byte("missing-file.txt")) {

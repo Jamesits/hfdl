@@ -3,6 +3,7 @@ package sched
 import (
 	"context"
 	"errors"
+	"maps"
 	"time"
 
 	"github.com/jamesits/hfdl/pkg/fcio"
@@ -112,9 +113,7 @@ func (m *Manager) Run(ctx context.Context) error {
 	}
 
 	// Periodic Recover + upstream EMA persistence.
-	m.wg.Add(1)
-	go func() {
-		defer m.wg.Done()
+	m.wg.Go(func() {
 		recoverTick := time.NewTicker(m.recoverInterval)
 		emaTick := time.NewTicker(10 * time.Second)
 		defer recoverTick.Stop()
@@ -143,7 +142,7 @@ func (m *Manager) Run(ctx context.Context) error {
 				m.persistUpstreamEMA(runCtx)
 			}
 		}
-	}()
+	})
 
 	// Drain loop: all jobs terminal (done|error).
 	for {
@@ -186,9 +185,7 @@ func (m *Manager) drained(ctx context.Context) (bool, error) {
 func (m *Manager) endJobSpans(ctx context.Context) {
 	m.spansMu.Lock()
 	open := make(map[int64]trace.Span, len(m.spans))
-	for id, sp := range m.spans {
-		open[id] = sp
-	}
+	maps.Copy(open, m.spans)
 	m.spansMu.Unlock()
 	if len(open) == 0 {
 		return

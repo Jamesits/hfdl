@@ -186,8 +186,7 @@ func (fd *fileDownload) handleOpenError(ws *workerState, b Block, attempt int, e
 		return
 	}
 
-	var rns *rangeNotSatisfiableError
-	if errors.As(err, &rns) {
+	if rns, ok := errors.AsType[*rangeNotSatisfiableError](err); ok {
 		span.AddEvent("416")
 		if fd.intervals.coversAll(fd.task.Size) {
 			// Benign: the file is already complete per size + IntervalSet.
@@ -208,16 +207,14 @@ func (fd *fileDownload) handleOpenError(ws *workerState, b Block, attempt int, e
 		return
 	}
 
-	var term *TerminalHTTPError
-	if errors.As(err, &term) {
+	if term, ok := errors.AsType[*TerminalHTTPError](err); ok {
 		span.RecordError(term)
 		span.SetStatus(codes.Error, term.Error())
 		fd.fail(term)
 		return
 	}
 
-	var ae *AttemptError
-	if errors.As(err, &ae) {
+	if ae, ok := errors.AsType[*AttemptError](err); ok {
 		switch ae.Kind {
 		case FailRangeless:
 			// 200 instead of 206: mark + requeue elsewhere, no EMA penalty.
@@ -340,10 +337,7 @@ const retryBackoffMax = 30 * time.Second
 // (production 500ms; tests shrink it) so the doubling schedule collapses under
 // test without touching production pacing.
 func (fd *fileDownload) retryBackoff(attempt int) time.Duration {
-	d := fd.d.cfg.RetryBackoffBase << min(attempt, 6)
-	if d > retryBackoffMax {
-		d = retryBackoffMax
-	}
+	d := min(fd.d.cfg.RetryBackoffBase<<min(attempt, 6), retryBackoffMax)
 	return time.Duration(float64(d) * (0.8 + 0.4*rand.Float64()))
 }
 
@@ -657,8 +651,7 @@ func (fd *fileDownload) runFallback(ctx context.Context) error {
 			fd.d.emit(fd.detached, Event{FileID: fd.task.FileID, Kind: EventBlockRetry, Bytes: n, Upstream: upstream, Err: err})
 		}
 		fd.penalize(upstream)
-		var term *TerminalHTTPError
-		if errors.As(err, &term) {
+		if term, ok := errors.AsType[*TerminalHTTPError](err); ok {
 			return term
 		}
 		select {

@@ -96,7 +96,7 @@ func TestDBBurstNeverBlocksHandle(t *testing.T) {
 
 	const n = 10000
 	start := time.Now()
-	for i := 0; i < n; i++ {
+	for i := range n {
 		log.Info("burst", "i", i)
 	}
 	elapsed := time.Since(start)
@@ -129,7 +129,7 @@ func TestDBSinkErrorDropsBatch(t *testing.T) {
 	h.AttachDB(t.Context(), sink)
 
 	// One full batch is enough to trigger a failing flush.
-	for i := 0; i < dbBatchSize; i++ {
+	for range dbBatchSize {
 		log.Info("m")
 	}
 	waitFor(t, "drop counter", func() bool { return h.DropCount() >= 1 })

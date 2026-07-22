@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"slices"
 
 	"github.com/jamesits/hfdl/pkg/fcio"
 )
@@ -67,8 +68,8 @@ func mkdirAllSync(path string, perm os.FileMode, syncDir func(string) error) err
 	if err := os.MkdirAll(path, perm); err != nil {
 		return err
 	}
-	for i := len(created) - 1; i >= 0; i-- {
-		if err := syncDir(created[i]); err != nil {
+	for _, c := range slices.Backward(created) {
+		if err := syncDir(c); err != nil {
 			return err
 		}
 	}

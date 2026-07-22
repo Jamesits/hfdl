@@ -27,7 +27,7 @@ func TestRingEvictionKeepsNewest(t *testing.T) {
 
 func TestRingSincePaging(t *testing.T) {
 	r := NewRing(20)
-	for i := 0; i < 10; i++ {
+	for range 10 {
 		r.Write(Record{Msg: "m"})
 	}
 	if got := len(r.Since(0)); got != 10 {
@@ -44,7 +44,7 @@ func TestRingSincePaging(t *testing.T) {
 
 func TestRingSinceAfterEviction(t *testing.T) {
 	r := NewRing(5)
-	for i := 0; i < 8; i++ {
+	for range 8 {
 		r.Write(Record{Msg: "m"})
 	}
 	// Cursor fell behind the eviction horizon: the caller sees everything
@@ -79,7 +79,7 @@ func TestRingCount(t *testing.T) {
 
 func TestRingDefaultCap(t *testing.T) {
 	r := NewRing(0)
-	for i := 0; i < defaultRingCap+100; i++ {
+	for range defaultRingCap + 100 {
 		r.Write(Record{Msg: "m"})
 	}
 	if got := len(r.All()); got != defaultRingCap {
@@ -90,14 +90,12 @@ func TestRingDefaultCap(t *testing.T) {
 func TestRingConcurrentWrite(t *testing.T) {
 	r := NewRing(64 * 200)
 	var wg sync.WaitGroup
-	for g := 0; g < 64; g++ {
-		wg.Add(1)
-		go func() {
-			defer wg.Done()
-			for i := 0; i < 200; i++ {
+	for range 64 {
+		wg.Go(func() {
+			for range 200 {
 				r.Write(Record{Msg: "m", Level: slog.LevelWarn})
 			}
-		}()
+		})
 	}
 	wg.Wait()
 	all := r.All()

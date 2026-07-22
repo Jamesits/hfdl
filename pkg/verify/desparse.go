@@ -90,8 +90,7 @@ func (c *Checker) deSparse(ctx context.Context, f *fcio.File, size int64) (strin
 				// Gap boundaries are page-aligned on Linux, but a fragment
 				// that still misses the direct-tier alignment rule goes
 				// through the buffered fd instead of failing the walk.
-				var uerr *fcio.UnalignedError
-				if !errors.As(werr, &uerr) {
+				if _, ok := errors.AsType[*fcio.UnalignedError](werr); !ok {
 					return fmt.Errorf("verify: desparse write %s @%d: %w", f.Path(), off, werr)
 				}
 				if werr := f.WriteUnaligned(zero.Data(), off); werr != nil {

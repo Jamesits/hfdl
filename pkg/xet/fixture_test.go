@@ -33,7 +33,7 @@ func bg4Split(data []byte) []byte {
 	d1 := out[s0 : s0+s1]
 	d2 := out[s0+s1 : s0+s1+s2]
 	d3 := out[s0+s1+s2:]
-	for i := 0; i < split; i++ {
+	for i := range split {
 		d0[i] = data[4*i]
 		d1[i] = data[4*i+1]
 		d2[i] = data[4*i+2]

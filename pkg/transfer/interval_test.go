@@ -126,7 +126,7 @@ func TestSerdeRoundTripRandom(t *testing.T) {
 	var seed [32]byte
 	seed[0] = 0x42
 	rng := rand.New(rand.NewChaCha8(seed))
-	for iter := 0; iter < 500; iter++ {
+	for iter := range 500 {
 		size := int64(1 + rng.Uint64N(1<<20))
 		s := &IntervalSet{size: size}
 		for i := 0; i < 1+rng.IntN(30); i++ {
@@ -188,8 +188,7 @@ func TestSerdeCorrupt(t *testing.T) {
 			if err == nil {
 				t.Fatalf("expected error for %q", tc.name)
 			}
-			var cpe *CorruptProgressError
-			if !errors.As(err, &cpe) {
+			if _, ok := errors.AsType[*CorruptProgressError](err); !ok {
 				t.Fatalf("error %v is not *CorruptProgressError", err)
 			}
 		})
@@ -221,8 +220,7 @@ func TestSerdeOverflow(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			var s IntervalSet
 			err := s.UnmarshalBinary(build(tc.size, tc.delta, tc.length))
-			var cpe *CorruptProgressError
-			if !errors.As(err, &cpe) {
+			if _, ok := errors.AsType[*CorruptProgressError](err); !ok {
 				t.Fatalf("overflow %q: err = %v, want *CorruptProgressError", tc.name, err)
 			}
 		})

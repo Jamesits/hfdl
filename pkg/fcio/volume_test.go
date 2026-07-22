@@ -69,7 +69,7 @@ func TestVolumeSetHDDReadVsRWExclusive(t *testing.T) {
 	blocked(t, "second HDD RW", rw2Ch)
 	relRW()
 	// Both waiters are admitted once the RW releases; order is unspecified.
-	for got := 0; got < 2; got++ {
+	for range 2 {
 		select {
 		case rel := <-rCh:
 			rel()

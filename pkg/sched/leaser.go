@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"maps"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -194,9 +195,7 @@ func (l *blockLeaser) Requeue(ctx context.Context, b transfer.Block, backoff tim
 func (l *blockLeaser) renew(ctx context.Context, until time.Time) {
 	l.mu.Lock()
 	pending := make(map[int64]store.LeaseToken, len(l.tokens))
-	for id, tok := range l.tokens {
-		pending[id] = tok
-	}
+	maps.Copy(pending, l.tokens)
 	l.mu.Unlock()
 	for id, tok := range pending {
 		// Individual fencing is ignored: a reclaimed block's late writes

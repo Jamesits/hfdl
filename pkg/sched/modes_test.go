@@ -147,8 +147,7 @@ func TestOfflineServesCache(t *testing.T) {
 		t.Fatalf("offline Submit: %v", err)
 	}
 	err = m3.Run(ctx)
-	var offErr *OfflineError
-	if !errors.As(err, &offErr) {
+	if _, ok := errors.AsType[*OfflineError](err); !ok {
 		t.Fatalf("offline unknown-repo Run = %v, want *OfflineError", err)
 	}
 }
@@ -192,8 +191,7 @@ func TestOfflineReapUncachedFile(t *testing.T) {
 		t.Fatalf("offline Submit: %v", err)
 	}
 	err := m2.Run(ctx)
-	var offErr *OfflineError
-	if !errors.As(err, &offErr) {
+	if _, ok := errors.AsType[*OfflineError](err); !ok {
 		t.Fatalf("offline Run = %v, want *OfflineError", err)
 	}
 	if got := hub.hitsFor("resolve"); got != 0 {

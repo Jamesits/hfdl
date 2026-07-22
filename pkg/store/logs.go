@@ -15,10 +15,7 @@ const logInsertChunk = 256
 // async sink goroutine. Errors propagate so the sink can count drops.
 func (s *Store) InsertLogs(ctx context.Context, rows []logging.LogRow) error {
 	for start := 0; start < len(rows); start += logInsertChunk {
-		end := start + logInsertChunk
-		if end > len(rows) {
-			end = len(rows)
-		}
+		end := min(start+logInsertChunk, len(rows))
 		logs := make([]Log, 0, end-start)
 		for _, r := range rows[start:end] {
 			logs = append(logs, Log{

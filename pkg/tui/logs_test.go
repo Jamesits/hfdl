@@ -99,7 +99,7 @@ func TestWarnBadgeClearsOnSwitch(t *testing.T) {
 
 func TestFollowScrollTransitions(t *testing.T) {
 	ring := logging.NewRing(100)
-	for i := 0; i < 30; i++ {
+	for i := range 30 {
 		writeRecs(ring, slog.LevelInfo, fmt.Sprintf("rec-%02d", i))
 	}
 	m := newModel(func() *Snapshot { return testSnapshot() }, ring, "x", Callbacks{})
@@ -156,11 +156,11 @@ func TestConcurrentRingWritesRaceClean(t *testing.T) {
 	m := newModel(func() *Snapshot { return testSnapshot() }, ring, "x", Callbacks{})
 
 	var wg sync.WaitGroup
-	for g := 0; g < 8; g++ {
+	for g := range 8 {
 		wg.Add(1)
 		go func(g int) {
 			defer wg.Done()
-			for i := 0; i < 200; i++ {
+			for i := range 200 {
 				ring.Write(logging.Record{Time: time.Now(), Level: slog.LevelWarn,
 					Source: "load", Msg: fmt.Sprintf("g%d-%d", g, i)})
 			}
@@ -170,7 +170,7 @@ func TestConcurrentRingWritesRaceClean(t *testing.T) {
 	done := make(chan struct{})
 	go func() {
 		defer close(done)
-		for i := 0; i < 400; i++ {
+		for range 400 {
 			tm, _ := m.Update(tickMsg(time.Now()))
 			m = tm.(model)
 			_ = m.render()

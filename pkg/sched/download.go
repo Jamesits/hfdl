@@ -39,10 +39,7 @@ func (m *Manager) downloadOrchestrator(ctx context.Context) {
 		}
 
 		limits := m.currentLimits()
-		maxWorkers := limits.MaxWorkers
-		if maxWorkers < 1 {
-			maxWorkers = 1
-		}
+		maxWorkers := max(limits.MaxWorkers, 1)
 		m.activeMu.Lock()
 		free := maxWorkers - len(m.active)
 		m.activeMu.Unlock()
@@ -489,8 +486,7 @@ func (m *Manager) prepareXetSource(ctx context.Context, f *store.File, repo *sto
 	}
 	xd, err := client.ResolveXet(ctx, rt, repo.Name, repo.CommitSHA, f.Path)
 	if err != nil {
-		var rl *hfapi.RateLimitError
-		if errors.As(err, &rl) {
+		if rl, ok := errors.AsType[*hfapi.RateLimitError](err); ok {
 			// Thread the file's accumulated retry count as the backoff attempt
 			// so repeated 429s (no Retry-After) climb the 1s→5m ladder instead
 			// of pinning the first rung forever.
@@ -509,8 +505,7 @@ func (m *Manager) prepareXetSource(ctx context.Context, f *store.File, repo *sto
 	}
 	src := m.cfg.Xet.NewSource(f.XetHash, f.Size, xd.RefreshRoute)
 	if err := src.Prepare(ctx); err != nil {
-		var rl *hfapi.RateLimitError
-		if errors.As(err, &rl) {
+		if rl, ok := errors.AsType[*hfapi.RateLimitError](err); ok {
 			_ = m.setCooldown(ctx, repo.Endpoint, store.CooldownCAS, rl.RetryAfter, f.Retries, "cas 429")
 		}
 		return nil, fmt.Errorf("sched: prepare xet %s: %w", f.Path, err)
@@ -561,10 +556,7 @@ func chunkBlocks(fileID int64, bounds []transfer.Interval, blockSize, startIdx i
 	idx := startIdx
 	for _, iv := range bounds {
 		for start := iv.Start; start < iv.End; {
-			end := start + blockSize
-			if end > iv.End {
-				end = iv.End
-			}
+			end := min(start+blockSize, iv.End)
 			out = append(out, store.Block{FileID: fileID, Idx: int(idx), Offset: start, Length: end - start})
 			idx++
 			start = end

@@ -47,7 +47,7 @@ func (m *Manager) expandReferences(ctx context.Context, j Job) ([]store.Referenc
 			continue
 		}
 		if !info.IsDir() {
-			if ref, ok := m.statReference(ctx, root, j); ok {
+			if ref, ok := m.statReference(root, j); ok {
 				out = append(out, ref)
 			} else {
 				rejected++
@@ -65,7 +65,7 @@ func (m *Manager) expandReferences(ctx context.Context, j Job) ([]store.Referenc
 				// Symlinks are followed explicitly below so the rejection
 				// test sees the resolved target.
 				if d.Type()&fs.ModeSymlink != 0 {
-					if ref, ok := m.statReference(ctx, path, j); ok {
+					if ref, ok := m.statReference(path, j); ok {
 						out = append(out, ref)
 					} else {
 						rejected++
@@ -73,7 +73,7 @@ func (m *Manager) expandReferences(ctx context.Context, j Job) ([]store.Referenc
 				}
 				return nil
 			}
-			if ref, ok := m.statReference(ctx, path, j); ok {
+			if ref, ok := m.statReference(path, j); ok {
 				out = append(out, ref)
 			} else {
 				rejected++
@@ -94,7 +94,7 @@ func (m *Manager) expandReferences(ctx context.Context, j Job) ([]store.Referenc
 // whether it survives the cache/destination exclusion. The stored path is
 // the symlink-resolved absolute path so dedupe and later opens see the real
 // file.
-func (m *Manager) statReference(ctx context.Context, path string, j Job) (store.ReferenceFile, bool) {
+func (m *Manager) statReference(path string, j Job) (store.ReferenceFile, bool) {
 	abs, err := filepath.Abs(path)
 	if err != nil {
 		return store.ReferenceFile{}, false

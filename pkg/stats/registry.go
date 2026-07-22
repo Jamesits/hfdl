@@ -203,10 +203,7 @@ func subClamp(a *atomic.Int64, delta int64) {
 	}
 	for {
 		v := a.Load()
-		nv := v - delta
-		if nv < 0 {
-			nv = 0
-		}
+		nv := max(v-delta, 0)
 		if a.CompareAndSwap(v, nv) {
 			return
 		}

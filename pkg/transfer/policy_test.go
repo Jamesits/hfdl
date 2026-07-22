@@ -22,7 +22,7 @@ func TestPolicyRandomDistribution(t *testing.T) {
 	src := newTestHTTPSource(task, testSeed(11))
 	counts := map[string]int{}
 	const n = 30000
-	for i := 0; i < n; i++ {
+	for range n {
 		u, err := src.pick(time.Now())
 		if err != nil {
 			t.Fatalf("pick: %v", err)
@@ -42,7 +42,7 @@ func TestPolicyRoundRobinExact(t *testing.T) {
 	task := policyTask(urls...)
 	task.Policy = config.RoundRobin
 	src := newTestHTTPSource(task, testSeed(12))
-	for round := 0; round < 5; round++ {
+	for round := range 5 {
 		for _, want := range urls {
 			u, err := src.pick(time.Now())
 			if err != nil {
@@ -84,7 +84,7 @@ func TestPolicyBestSpeedExploits(t *testing.T) {
 	src.ema["http://mid"] = 400
 	counts := map[string]int{}
 	const n = 30000
-	for i := 0; i < n; i++ {
+	for range n {
 		u, err := src.pick(time.Now())
 		if err != nil {
 			t.Fatalf("pick: %v", err)
@@ -116,7 +116,7 @@ func TestPolicyEMAUpdate(t *testing.T) {
 	src.reportRate("http://a", 10000) // ema a → 0.2*10000+0.8*100 = 2080
 	// a must dominate (ε-exploration still sends ~10% elsewhere).
 	wins := 0
-	for i := 0; i < 100; i++ {
+	for range 100 {
 		u, err := src.pick(time.Now())
 		if err != nil {
 			t.Fatal(err)
@@ -163,7 +163,7 @@ func TestPenalizeBlacklistsUntilTTLExpiry(t *testing.T) {
 	if !ok || !until.After(time.Now()) {
 		t.Fatal("penalize did not install a temporary blacklist")
 	}
-	for i := 0; i < 4; i++ {
+	for range 4 {
 		got, err := src.pick(time.Now())
 		if err != nil {
 			t.Fatalf("pick while blacklisted: %v", err)

@@ -243,12 +243,10 @@ func (f *File) DataExtents() ([][2]int64, error) {
 		if n == 0 {
 			break
 		}
-		for i := 0; i < n; i++ {
+		for i := range n {
 			start := out[i].FileOffset
 			end := out[i].FileOffset + out[i].Length
-			if end > size {
-				end = size
-			}
+			end = min(end, size)
 			if end > start {
 				extents = append(extents, [2]int64{start, end})
 			}

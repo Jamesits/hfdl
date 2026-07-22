@@ -32,10 +32,7 @@ func (m *Manager) SetLimits(l config.Limits) {
 		m.cfg.Bandwidth.SetRate(l.MaxBandwidthBps, config.BandwidthBurst(l.MaxBandwidthBps))
 	}
 	if m.cfg.API != nil && l.APIIOPS > 0 {
-		burst := l.APIBurst
-		if burst < 1 {
-			burst = 1
-		}
+		burst := max(l.APIBurst, 1)
 		m.cfg.API.SetRate(l.APIIOPS, burst)
 	}
 	if m.cfg.Duty != nil && l.DiskActivePct > 0 {

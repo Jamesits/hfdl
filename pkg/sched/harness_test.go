@@ -645,7 +645,7 @@ func (e *testEnv) jobStatus(t *testing.T, jobID int64) string {
 }
 
 // contentOf reads the installed cache-mode file for repo org/repo at path.
-func (e *testEnv) installedSnapshotPath(repo, rev, sha, path string) string {
+func (e *testEnv) installedSnapshotPath(repo, sha, path string) string {
 	return filepath.Join(e.cache.Root(),
 		"models--"+strings.ReplaceAll(repo, "/", "--"), "snapshots", sha, path)
 }

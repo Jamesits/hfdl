@@ -95,6 +95,9 @@ func validateModel(repoType, repoName string) error {
 // no-replace publication on POSIX and Windows (NTFS); EEXIST means another
 // writer published first.
 func (in *Installer) writeTreeCacheIfAbsent(ctx context.Context, parent, commitSHA string, entries []TreeEntry) (bool, error) {
+	if err := ctx.Err(); err != nil {
+		return false, err
+	}
 	treePath, err := treeCachePath(parent, commitSHA)
 	if err != nil {
 		return false, err

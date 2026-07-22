@@ -38,8 +38,7 @@ const (
 // isBusyErr reports whether err is any SQLITE_BUSY variant. The modernc
 // driver enables extended result codes, so Code() may be 517 & friends.
 func isBusyErr(err error) bool {
-	var se *sqlite.Error
-	if errors.As(err, &se) {
+	if se, ok := errors.AsType[*sqlite.Error](err); ok {
 		return se.Code()&0xff == sqliteBusyPrimary
 	}
 	return false
@@ -59,7 +58,7 @@ func jitter(d time.Duration) time.Duration {
 func withBusyRetry(ctx context.Context, fn func() error) error {
 	backoff := busyBaseBackoff
 	var err error
-	for attempt := 0; attempt < busyMaxAttempts; attempt++ {
+	for attempt := range busyMaxAttempts {
 		if err = fn(); !isBusyErr(err) {
 			return err
 		}

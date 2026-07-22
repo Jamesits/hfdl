@@ -93,7 +93,7 @@ func TestRunZeroStdWrites(t *testing.T) {
 	logsDone := make(chan struct{})
 	go func() {
 		defer close(logsDone)
-		for i := 0; i < 100; i++ {
+		for i := range 100 {
 			log.Info("concurrent TUI log", "record", i)
 		}
 	}()

@@ -8,6 +8,7 @@ import (
 	"io"
 	"log/slog"
 	"math"
+	"slices"
 	"strconv"
 	"sync"
 	"sync/atomic"
@@ -161,8 +162,8 @@ func attrsAt(groups []string, as []slog.Attr) []attrEntry {
 
 // nest wraps attrs in nested group values, outermost group first.
 func nest(groups []string, as []slog.Attr) []slog.Attr {
-	for i := len(groups) - 1; i >= 0; i-- {
-		as = []slog.Attr{{Key: groups[i], Value: slog.GroupValue(as...)}}
+	for _, group := range slices.Backward(groups) {
+		as = []slog.Attr{{Key: group, Value: slog.GroupValue(as...)}}
 	}
 	return as
 }

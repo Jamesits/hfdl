@@ -225,7 +225,7 @@ func TestLeaseBlocksConcurrent(t *testing.T) {
 	results := make([][]LeasedBlock, workers)
 	errs := make([]error, workers)
 	var wg sync.WaitGroup
-	for i := 0; i < workers; i++ {
+	for i := range workers {
 		wg.Add(1)
 		go func(i int) {
 			defer wg.Done()

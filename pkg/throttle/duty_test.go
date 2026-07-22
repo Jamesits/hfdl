@@ -416,9 +416,7 @@ func TestCheckpointConcurrent(t *testing.T) {
 	d := NewDutyLimiter(99, MediaSSD)
 	var wg sync.WaitGroup
 	for range 32 {
-		wg.Add(1)
-		go func() {
-			defer wg.Done()
+		wg.Go(func() {
 			var c DutyCalc
 			for range 50 {
 				if err := d.Checkpoint(t.Context(), &c); err != nil {
@@ -426,7 +424,7 @@ func TestCheckpointConcurrent(t *testing.T) {
 					return
 				}
 			}
-		}()
+		})
 	}
 	wg.Wait()
 	if got := d.Stats().Workers; got != 32 {

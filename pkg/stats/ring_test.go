@@ -106,13 +106,11 @@ func TestRateRingConcurrentAdds(t *testing.T) {
 	var r rateRing
 	var wg sync.WaitGroup
 	for range 32 {
-		wg.Add(1)
-		go func() {
-			defer wg.Done()
+		wg.Go(func() {
 			for range 1000 {
 				r.Add(c.now().Unix(), 1)
 			}
-		}()
+		})
 	}
 	wg.Wait()
 	if got := r.Rate(c.now().Unix()); got != 3200 {

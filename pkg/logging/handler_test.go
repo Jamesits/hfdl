@@ -112,12 +112,12 @@ func TestConcurrentHandle(t *testing.T) {
 	h := NewHandler(slog.LevelInfo, &stderr, ring)
 
 	var wg sync.WaitGroup
-	for g := 0; g < 64; g++ {
+	for g := range 64 {
 		wg.Add(1)
 		go func(g int) {
 			defer wg.Done()
 			log := slog.New(h).With("g", g)
-			for i := 0; i < 200; i++ {
+			for i := range 200 {
 				log.Info("tick", "i", i)
 			}
 		}(g)

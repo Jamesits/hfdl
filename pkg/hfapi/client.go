@@ -222,7 +222,7 @@ func statusError(resp *http.Response, repo, rev string) error {
 // returned verbatim (the Hub's pagination/xet-auth URLs are followed as-is).
 func linkRel(header, rel string) string {
 	want := `rel="` + rel + `"`
-	for _, seg := range strings.Split(header, ",") {
+	for seg := range strings.SplitSeq(header, ",") {
 		if !strings.Contains(seg, want) {
 			continue
 		}

@@ -27,7 +27,7 @@ func TestHashMismatchRequeue(t *testing.T) {
 	if err := env.manager.Run(ctx); err != nil {
 		t.Fatalf("Run: %v", err)
 	}
-	got, err := os.ReadFile(env.installedSnapshotPath("org/repo", "main", hub.sha, "m.bin"))
+	got, err := os.ReadFile(env.installedSnapshotPath("org/repo", hub.sha, "m.bin"))
 	if err != nil {
 		t.Fatalf("read installed: %v", err)
 	}
@@ -80,7 +80,7 @@ func TestVerifyFailTwiceErrors(t *testing.T) {
 		t.Errorf("job status = %s, want error", jobErr)
 	}
 	// Never installed: the bad bytes must not reach the cache blob either.
-	if _, err := os.Stat(env.installedSnapshotPath("org/repo", "main", hub.sha, "m.bin")); !os.IsNotExist(err) {
+	if _, err := os.Stat(env.installedSnapshotPath("org/repo", hub.sha, "m.bin")); !os.IsNotExist(err) {
 		t.Errorf("corrupt file was installed")
 	}
 }

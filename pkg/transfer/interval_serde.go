@@ -95,7 +95,7 @@ func (s *IntervalSet) UnmarshalBinary(b []byte) error {
 	}
 	iv := make([]Interval, 0, count)
 	prevEnd := int64(0)
-	for i := uint64(0); i < count; i++ {
+	for i := range count {
 		delta, n := binary.Uvarint(rest)
 		if n <= 0 {
 			return &CorruptProgressError{Reason: fmt.Sprintf("truncated interval %d start", i)}

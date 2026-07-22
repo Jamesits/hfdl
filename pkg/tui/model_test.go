@@ -211,7 +211,7 @@ func TestQuitKeys(t *testing.T) {
 
 func TestResizeKeepsRenderInBounds(t *testing.T) {
 	s := testSnapshot()
-	for i := 0; i < 30; i++ {
+	for i := range 30 {
 		s.Active = append(s.Active, FileProgress{
 			FileID: int64(100 + i), Path: strings.Repeat("deep/", 10) + "file.bin",
 			Done: 1, Total: 100, Conns: 2, Rate: 1e6,

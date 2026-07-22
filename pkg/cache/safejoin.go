@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 )
 
@@ -57,10 +58,8 @@ func validateRepoPath(p string) error {
 	if strings.ContainsRune(p, '\\') {
 		return &PathSafetyError{Path: p, Reason: "contains backslash path separator"}
 	}
-	for _, comp := range strings.Split(filepath.ToSlash(p), "/") {
-		if comp == ".." {
-			return &PathSafetyError{Path: p, Reason: `contains ".." component`}
-		}
+	if slices.Contains(strings.Split(filepath.ToSlash(p), "/"), "..") {
+		return &PathSafetyError{Path: p, Reason: `contains ".." component`}
 	}
 	return nil
 }

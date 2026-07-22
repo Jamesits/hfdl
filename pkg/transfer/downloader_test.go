@@ -14,12 +14,12 @@ import (
 
 func TestEventChannelSaturationNeverBlocks(t *testing.T) {
 	d := testDownloader(t)
-	for i := 0; i < eventsCap; i++ {
+	for i := range eventsCap {
 		d.emit(t.Context(), Event{FileID: int64(i)})
 	}
 	done := make(chan struct{})
 	go func() {
-		for i := 0; i < 17; i++ {
+		for i := range 17 {
 			d.emit(t.Context(), Event{FileID: int64(i)})
 		}
 		close(done)
@@ -345,8 +345,7 @@ func TestDownload416Mismatch(t *testing.T) {
 	task.Conns = 1
 	sink := openSink(t, size)
 	err := d.Run(t.Context(), task, sink, nil)
-	var rfe *ResetFileError
-	if !errors.As(err, &rfe) {
+	if _, ok := errors.AsType[*ResetFileError](err); !ok {
 		t.Fatalf("got %v, want *ResetFileError", err)
 	}
 }
