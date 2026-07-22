@@ -8,9 +8,9 @@ import (
 )
 
 // SetLimits hot-updates every limit surface: bandwidth and API
-// buckets, the disk duty level, per-active-file connection counts, and the
-// operator pause. The settings persist to the store kv table so a restart
-// keeps them.
+// buckets, the disk duty level, the global connection budget ceiling, and
+// the operator pause. The settings persist to the store kv table so a
+// restart keeps them.
 //
 // Pause contract: MaxBandwidthBps == 0 && DiskActivePct == 0 (cmd's pause
 // toggle) pauses the download and install queues; while paused the
@@ -40,15 +40,24 @@ func (m *Manager) SetLimits(l config.Limits) {
 		m.cfg.Duty.SetLevel(l.DiskActivePct)
 	}
 
-	// Hot connection-count update across the active download set: the
-	// per-file conns cap applies to files already in 'downloading'.
-	if l.Conns > 0 && m.cfg.Downloader != nil {
-		m.activeMu.Lock()
-		for fid := range m.active {
-			m.cfg.Downloader.SetParallelism(fid, l.Conns)
+	// A lowered MaxWorkers clamps the live budget immediately, under the
+	// allocation lock so an in-flight tune tick cannot republish the stale,
+	// higher value. The immediate rebalance shrinks the per-file counts
+	// (drain semantics — in-flight blocks finish); the controller itself
+	// re-clamps on its next Observe.
+	m.allocMu.Lock()
+	if mw := int64(max(l.MaxWorkers, 1)); m.budget.Load() > mw || m.committed.Load() > mw {
+		if m.budget.Load() > mw {
+			m.budget.Store(mw)
 		}
-		m.activeMu.Unlock()
+		if m.committed.Load() > mw {
+			m.committed.Store(mw)
+		}
+		if m.cfg.Downloader != nil {
+			m.rebalanceLocked(m.connBudget())
+		}
 	}
+	m.allocMu.Unlock()
 
 	m.pause.set(paused)
 	if !paused {

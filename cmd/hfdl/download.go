@@ -43,7 +43,6 @@ type downloadFlags struct {
 
 	endpointFlags  []string
 	maxWorkers     int
-	connections    int
 	blockSizeStr   string
 	policyStr      string
 	sourcePrioStr  string
@@ -100,11 +99,10 @@ func newDownloadCmd() *cobra.Command {
 	fl.BoolVar(&f.quiet, "quiet", false, "suppress progress output; only the final path is printed")
 	fl.BoolVar(&f.forceDownload, "force-download", false, "re-download even when the file is already cached")
 	fl.BoolVar(&f.dryRun, "dry-run", false, "resolve and list what would be downloaded, then exit")
-	fl.IntVar(&f.maxWorkers, "max-workers", dfl.MaxWorkers, "files downloaded concurrently")
+	fl.IntVar(&f.maxWorkers, "max-workers", dfl.MaxWorkers, "total download connections across all files")
 
 	// hfdl extensions (must start with hfdl)
 	fl.StringArrayVar(&f.endpointFlags, "hfdl-endpoint", nil, "Hub endpoint URL (repeatable; mirrors after the first; default $HF_ENDPOINT)")
-	fl.IntVar(&f.connections, "hfdl-connections", dfl.Conns, "block connections per file")
 	fl.StringVar(&f.blockSizeStr, "hfdl-block-size", "", "download block size (default: adaptive 4MiB-64MiB)")
 	fl.StringVar(&f.policyStr, "hfdl-upstream-policy", config.BestSpeed.String(), "per-block upstream selection: best-speed|random|round-robin")
 	fl.StringVar(&f.sourcePrioStr, "hfdl-source-priority", "", "transfer source preference when a xet hash exists: xet|cdn (default xet; cdn when $HF_HUB_DISABLE_XET is set)")
@@ -171,7 +169,6 @@ func buildPlan(f *downloadFlags, getenv func(string) string) (*downloadPlan, err
 
 	limits := config.DefaultLimits()
 	limits.MaxWorkers = f.maxWorkers
-	limits.Conns = f.connections
 	limits.APIIOPS = f.apiIOPS
 	limits.DiskActivePct = f.diskActive
 	limits.DiskWorkers = f.diskWorkers

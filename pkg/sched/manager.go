@@ -170,6 +170,20 @@ type Manager struct {
 	// SetParallelism reads it under mu).
 	activeMu sync.Mutex
 	active   map[int64]*activeFile
+	admitSeq uint64 // admission order counter (guarded by activeMu)
+
+	// budget is the live global connection budget published by the tune
+	// loop (autotune.go); rebalance reads it. Starts at 1 and hill-climbs
+	// toward Limits.MaxWorkers. committed lags budget by any in-flight
+	// probe: admission keys off it so a speculative probe can never admit a
+	// file that a revert cannot evict (see Controller.Committed). allocMu
+	// serializes every budget-publication and per-file connection
+	// allocation (tune tick, admission grant, SetLimits clamp) so two
+	// allocators can never split the same budget from crossed snapshots or
+	// interleave SetParallelism calls into a lost update.
+	allocMu   sync.Mutex
+	budget    atomic.Int64
+	committed atomic.Int64
 
 	// salvage bookkeeping (salvage.go / disk.go). salvageMu guards refsEnabled;
 	// salvaging files are now claimed by the durable store lease (LeaseSalvage),
@@ -231,7 +245,9 @@ type Manager struct {
 	enospcPoll               time.Duration
 	nowFn                    func() time.Time
 	recoverInterval          time.Duration // defaults to recoverInterval const
+	tuneEvery                time.Duration // defaults to tuneTick const
 	runDownload              func(ctx context.Context, t *transfer.FileTask, sink *fcio.File, progress transfer.ProgressSink) error
+	setParallelism           func(fileID int64, n int)
 	freeSpaceUnsupportedOnce sync.Once
 	identityUnsupportedOnce  sync.Once
 }
@@ -246,9 +262,19 @@ type jobHeader struct {
 
 // activeFile is one in-flight download.
 type activeFile struct {
-	file   store.File
-	conns  int
-	cancel context.CancelFunc
+	file store.File
+	// seq orders the active set by admission: rebalance deepens the oldest
+	// file first so the file already downloading finishes before newer ones
+	// ramp up.
+	seq uint64
+	// blockSize and remaining bound the file's useful parallelism (one
+	// connection per remaining block). remaining starts as the
+	// admission-time missing-byte count and shrinks only on durable block
+	// completion (noteBlockDone), guarded by activeMu.
+	blockSize int64
+	remaining int64
+	conns     int
+	cancel    context.CancelFunc
 }
 
 // NewManager builds the manager. Limits come from cfg.Limits; persisted
@@ -261,7 +287,7 @@ func NewManager(cfg ManagerConfig) *Manager {
 	if cfg.Prov == nil {
 		cfg.Prov = otel.Noop()
 	}
-	if cfg.Limits.APIIOPS == 0 && cfg.Limits.DiskActivePct == 0 && cfg.Limits.Conns == 0 {
+	if cfg.Limits.APIIOPS == 0 && cfg.Limits.DiskActivePct == 0 && cfg.Limits.MaxWorkers == 0 {
 		cfg.Limits = config.DefaultLimits()
 	}
 	m := &Manager{
@@ -283,10 +309,14 @@ func NewManager(cfg ManagerConfig) *Manager {
 		enospcPoll:      time.Second,
 		nowFn:           time.Now,
 		recoverInterval: recoverInterval,
+		tuneEvery:       tuneTick,
 	}
 	if cfg.Downloader != nil {
 		m.runDownload = cfg.Downloader.Run
+		m.setParallelism = cfg.Downloader.SetParallelism
 	}
+	m.budget.Store(1) // slow start; the tune loop climbs from here
+	m.committed.Store(1)
 	m.limits = cfg.Limits
 	m.metaEndpoint = pickMetaEndpoint(cfg.Clients)
 

@@ -93,6 +93,10 @@ func (b *Bucket) SetWaitCounter(c metric.Float64Counter, bucket string) {
 	b.waitAttrs = metric.WithAttributes(attribute.String("bucket", bucket))
 }
 
+// Limited reports whether the bucket currently enforces a rate (rate > 0).
+// PacedTransport uses it to skip the small-chunk read cap while unlimited.
+func (b *Bucket) Limited() bool { return b.rate.Load() > 0 }
+
 // Wait blocks until n tokens are available and consumes them, or until ctx
 // is done (returning ctx.Err()). n <= 0 never blocks.
 func (b *Bucket) Wait(ctx context.Context, n int64) error {

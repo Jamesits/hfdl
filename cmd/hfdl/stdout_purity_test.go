@@ -80,7 +80,7 @@ func TestStdoutPurity(t *testing.T) {
 				"--local-dir", outputDir,
 				"--hfdl-endpoint", hub.URL,
 				"--hfdl-state-db", filepath.Join(root, "state", "state.db"),
-				"--hfdl-no-tui", "--hfdl-connections", "1",
+				"--hfdl-no-tui",
 			}
 			if quiet {
 				args = append(args, "--quiet")

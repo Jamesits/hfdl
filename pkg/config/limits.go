@@ -122,26 +122,26 @@ type Limits struct {
 	APIBurst           int64         // API bucket burst
 	DiskActivePct      int           // disk duty-cycle ceiling 1–100 (percentage)
 	DiskWorkers        int           // disk-queue worker count; 0 = auto by media (SSD 2, else 1). Runtime-capped to GOMAXPROCS-1 to avoid CPU starvation (see sched.diskWorkerCount)
-	Conns              int           // per-file block connections
-	MaxWorkers         int           // files in downloading at once (upstream parity flag)
-	BlockSize          int64         // 0 = adaptive: clamp(pow2(size/conns), 4MiB, 64MiB)
+	MaxWorkers         int           // max total download connections across all files (adaptive controller ceiling)
+	BlockSize          int64         // 0 = adaptive: clamp(pow2(size/pivot), 4MiB, 64MiB)
 	StallTimeout       time.Duration // idle-read / soft floor window
 	StallMinBytes      int64         // soft throughput floor per window
-	IOBuffer           int64         // fcio pool cap bytes; 0 = auto clamp(slab×conns×2, 64MiB, 1GiB) capped at ½ RAM
+	IOBuffer           int64         // fcio pool cap bytes; 0 = auto clamp(slab×workers×2, 64MiB, 1GiB) capped at ½ RAM
 	CheckpointInterval time.Duration // durable progress cadence
 	IOMode             IOMode
 	UpstreamPolicy     UpstreamPolicy
 	SourcePriority     SourcePriority // xet vs cdn transfer source preference
 }
 
-// bandwidthMinBurst floors the bandwidth bucket burst when a limit is set: a
-// burst below the caller's read-chunk size (pool slabs are multi-MiB) forces
-// throttle.Bucket into single-token installments that hit its per-wait floor,
-// collapsing throughput to a crawl.
-const bandwidthMinBurst = 8 << 20
+// bandwidthMinBurst floors the bandwidth bucket burst when a limit is set.
+// Pacing happens at the HTTP transport in <=64KiB installments
+// (throttle.PacedTransport), so the burst only needs to comfortably exceed
+// one paced chunk; a large burst would let the whole pool overshoot the
+// ceiling by that much after every idle gap.
+const bandwidthMinBurst = 1 << 20
 
 // BandwidthBurst picks the token-bucket burst for a bandwidth ceiling:
-// max(limit/2, 8MiB) when limited; an unlimited (<=0) ceiling ignores burst.
+// max(limit/8, 1MiB) when limited; an unlimited (<=0) ceiling ignores burst.
 // It is shared by the initial wiring and by SetLimits so every rate change is
 // paired with a burst that scales to it — inheriting a stale burst (notably an
 // unlimited bucket's 0, which SetRate clamps to 1) would throttle the whole
@@ -150,7 +150,7 @@ func BandwidthBurst(limit int64) int64 {
 	if limit <= 0 {
 		return 0
 	}
-	if b := limit / 2; b > bandwidthMinBurst {
+	if b := limit / 8; b > bandwidthMinBurst {
 		return b
 	}
 	return bandwidthMinBurst
@@ -163,8 +163,7 @@ func DefaultLimits() Limits {
 		APIBurst:           1,
 		DiskActivePct:      100,
 		DiskWorkers:        0, // auto: sched picks by media class
-		Conns:              8,
-		MaxWorkers:         8,
+		MaxWorkers:         16,
 		BlockSize:          0,
 		StallTimeout:       15 * time.Second,
 		StallMinBytes:      32 * 1024,
@@ -176,8 +175,8 @@ func DefaultLimits() Limits {
 	}
 }
 
-// Validate enforces the CLI-facing ranges: api-iops, connections and
-// max-workers >= 1, disk-active within 1-100, positive durations.
+// Validate enforces the CLI-facing ranges: api-iops and max-workers >= 1,
+// disk-active within 1-100, positive durations.
 func (l *Limits) Validate() error {
 	if l.APIIOPS < 1 {
 		return fmt.Errorf("api-iops must be >= 1, got %d", l.APIIOPS)
@@ -187,9 +186,6 @@ func (l *Limits) Validate() error {
 	}
 	if l.DiskWorkers < 0 {
 		return fmt.Errorf("disk-workers must be >= 0 (0 = auto), got %d", l.DiskWorkers)
-	}
-	if l.Conns < 1 {
-		return fmt.Errorf("connections must be >= 1, got %d", l.Conns)
 	}
 	if l.MaxWorkers < 1 {
 		return fmt.Errorf("max-workers must be >= 1, got %d", l.MaxWorkers)

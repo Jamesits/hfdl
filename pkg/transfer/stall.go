@@ -7,7 +7,7 @@ import (
 	"time"
 )
 
-// Stall policy, four layers — the hard layers are never suspended:
+// Stall policy, four layers — layers 1 and 2 are never suspended:
 //
 //  1. Header deadline (enforced in httpSource.do): response headers within
 //     cfg.HeaderTimeout.
@@ -16,7 +16,7 @@ import (
 //     a transfer.
 //  3. Hard no-progress ceiling: a connection that has not met the floor for
 //     hardStallFactor × StallWindow is killed regardless of soft-policy
-//     hysteresis — a trickling conn cannot survive even with --connections 1.
+//     hysteresis — a trickling conn cannot survive even with one connection.
 //  4. Soft throughput floor: per-connection sliding windows count
 //     application bytes against StallMinBytes per StallWindow. Enforcement
 //     arms only once some connection of the file has proven the path can
@@ -26,6 +26,11 @@ import (
 //     one full window post-connect (warmup, implicit in windowed
 //     evaluation). Suspended periods never kill, so they never penalize EMA
 //     or count retries.
+//
+// Layers 3 and 4 additionally pass through the process-wide killGate
+// (killgate.go), which suspends throughput kills while the global bandwidth
+// limiter is the active constraint, during post-kill verification, and
+// during congestion suppression.
 const hardStallFactor = 10
 
 // stallReason identifies which layer killed a connection (span/event
@@ -59,6 +64,11 @@ type stallMonitor struct {
 	window time.Duration
 	floor  int64
 	now    func() time.Time
+
+	// gate is the process-wide throughput-kill coordinator (nil = always
+	// allow, the bare-monitor test construction). Layers 3 and 4 consult it;
+	// layer 2 (idle read) never does.
+	gate *killGate
 
 	mu    sync.Mutex
 	armed bool
@@ -206,19 +216,25 @@ func (m *stallMonitor) sweep(now time.Time) {
 			m.killLocked(c, stallIdle)
 			continue
 		}
-		// Layer 3: hard no-progress ceiling — never suspended. Fires only on
-		// TRUE no-progress: fewer than one floor's worth of bytes delivered in
-		// hardStallFactor windows since the last floor-meeting window. A
-		// steadily slow-but-progressing conn keeps sinceFloorBytes at or above
-		// the floor and survives; a ~hung trickle (e.g. a byte per window)
-		// eventually trips it even with --connections 1.
+		// Layer 3: hard no-progress ceiling. Fires only on TRUE no-progress:
+		// fewer than one floor's worth of bytes delivered in hardStallFactor
+		// windows since the last floor-meeting window. A steadily
+		// slow-but-progressing conn keeps sinceFloorBytes at or above the
+		// floor and survives; a ~hung trickle (e.g. a byte per window)
+		// eventually trips it even with a single connection. The process-wide
+		// gate can suspend it (bandwidth ceiling active / kill verification /
+		// congestion suppression) — a globally-limited conn trickles because
+		// of the limiter, not because it is hung.
 		if now.Sub(c.lastFloor) >= hardStallFactor*m.window && c.sinceFloorBytes < m.floor {
-			m.killLocked(c, stallHardCeiling)
+			if m.gate.tryKill() {
+				m.killLocked(c, stallHardCeiling)
+			}
 			continue
 		}
 		// Layer 4: soft throughput floor. Armed file, this conn below floor,
-		// and hysteresis clear (some conn is above the floor THIS window).
-		if m.armed && !r.met && anyAbove {
+		// hysteresis clear (some conn is above the floor THIS window), and
+		// the process-wide gate granting the kill.
+		if m.armed && !r.met && anyAbove && m.gate.tryKill() {
 			m.killLocked(c, stallSoftFloor)
 		}
 	}

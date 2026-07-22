@@ -17,8 +17,8 @@ func TestBandwidthBurst(t *testing.T) {
 	if got := BandwidthBurst(4 << 20); got != bandwidthMinBurst {
 		t.Fatalf("small limit burst = %d, want floor %d", got, bandwidthMinBurst)
 	}
-	if got := BandwidthBurst(64 << 20); got != 32<<20 {
-		t.Fatalf("burst = %d, want limit/2", got)
+	if got := BandwidthBurst(64 << 20); got != 8<<20 {
+		t.Fatalf("burst = %d, want limit/8", got)
 	}
 }
 
@@ -174,15 +174,20 @@ func TestLimitsValidate(t *testing.T) {
 	if err := ok.Validate(); err != nil {
 		t.Fatalf("defaults valid: %v", err)
 	}
+	// MaxWorkers is the adaptive controller's ceiling on total download
+	// connections; 16 is the documented default.
+	if ok.MaxWorkers != 16 {
+		t.Fatalf("DefaultLimits().MaxWorkers = %d, want 16", ok.MaxWorkers)
+	}
 	bad := DefaultLimits()
 	bad.DiskActivePct = 101
 	if err := bad.Validate(); err == nil {
 		t.Fatal("disk-active 101 accepted")
 	}
 	bad = DefaultLimits()
-	bad.Conns = 0
+	bad.MaxWorkers = 0
 	if err := bad.Validate(); err == nil {
-		t.Fatal("connections 0 accepted")
+		t.Fatal("max-workers 0 accepted")
 	}
 	bad = DefaultLimits()
 	bad.DiskWorkers = -1

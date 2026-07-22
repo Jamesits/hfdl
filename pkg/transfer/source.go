@@ -342,6 +342,11 @@ func (s *httpSource) openWhole(ctx context.Context) (io.ReadCloser, error) {
 	if err != nil {
 		return nil, fmt.Errorf("transfer: build request: %w", err)
 	}
+	// Identity, like the ranged path: without it Go's transport may request
+	// gzip and transparently decompress, which would break Content-Length
+	// validation and make the paced transport charge decompressed instead of
+	// wire bytes.
+	req.Header.Set("Accept-Encoding", "identity")
 	resp, cancel, err := s.do(ctx, req, up.Endpoint)
 	if err != nil {
 		return nil, err

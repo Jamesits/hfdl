@@ -25,9 +25,13 @@ type ProgressSink func(ctx context.Context, fileID int64, blob []byte) error
 // down; the partial buffer is flushed and the block requeued for a peer.
 var errDrain = errors.New("transfer: worker draining")
 
-// workerState is one download goroutine. drain+cancel implement hot
-// downscale: cancel interrupts any blocked Lease/read, and the drain flag
-// routes the abort to the flush-and-exit path.
+// workerState is one download goroutine. The drain flag implements hot
+// downscale gracefully: a marked worker finishes its in-flight block (the
+// scheduler's documented contract — no wasted wire bytes, no requeue churn)
+// and exits at the next loop boundary; the idle park below re-polls within
+// leaseRePoll, bounding drain latency for workers with no block. Cancelling
+// ws.ctx at downscale instead would abort mid-block: under rapid downscale
+// churn no block ever completes and the run livelocks.
 type workerState struct {
 	drain  atomic.Bool
 	ctx    context.Context
@@ -41,7 +45,7 @@ func (fd *fileDownload) worker(ws *workerState) {
 	defer fd.removeWorker(ws)
 	defer ws.cancel()
 	for {
-		if ws.ctx.Err() != nil {
+		if ws.ctx.Err() != nil || ws.drain.Load() {
 			return
 		}
 		leaseStart := time.Now()
@@ -118,7 +122,7 @@ func (fd *fileDownload) executeBlock(ws *workerState, b Block, queueWait time.Du
 	// delivered (detached) would corrupt consumers' in-flight accounting.
 	fd.d.emit(fd.workersCtx, Event{FileID: fd.task.FileID, BlockID: b.ID, Kind: EventBlockStart, Upstream: upstream})
 
-	read, serr := fd.streamBlock(ws, attemptCtx, conn, b, body, upstream)
+	read, serr := fd.streamBlock(attemptCtx, conn, b, body, upstream)
 	elapsed := time.Since(started)
 
 	switch {
@@ -365,11 +369,12 @@ func (fd *fileDownload) penalize(upstream string) {
 
 // streamBlock reads the body into pool slabs and flushes through fcio.
 // Exactly b.Length bytes must arrive; the buffer invariant is: buf holds
-// file range [base, base+fill), never crossing the block boundary. On
-// drain/stall/shutdown abort it flushes the partial buffer (zero-padding
-// forward within the block interior, never recorded as progress) and
-// returns the cause.
-func (fd *fileDownload) streamBlock(ws *workerState, ctx context.Context, conn *connTrack, b Block, body io.Reader, upstream string) (int64, error) {
+// file range [base, base+fill), never crossing the block boundary. On a
+// stall/shutdown abort it flushes the partial buffer (zero-padding forward
+// within the block interior, never recorded as progress) and returns the
+// cause. A downscale drain never aborts a stream: the marked worker
+// finishes this block and exits at its loop boundary (see workerState).
+func (fd *fileDownload) streamBlock(ctx context.Context, conn *connTrack, b Block, body io.Reader, upstream string) (int64, error) {
 	pool := fd.d.cfg.Pool
 	slabSize := pool.SlabSize()
 	st := fd.d.cfg.Stats
@@ -382,11 +387,10 @@ func (fd *fileDownload) streamBlock(ws *workerState, ctx context.Context, conn *
 			if skip >= b.Length {
 				return b.Length, nil
 			}
+			// The discarded prefix is paced at the transport like any other
+			// body read; only local accounting happens here.
 			if _, err := io.CopyN(io.Discard, body, skip); err != nil {
 				return 0, fd.classifyReadErr(conn, err)
-			}
-			if werr := fd.d.cfg.Bandwidth.Wait(ctx, skip); werr != nil {
-				return 0, fd.classifyReadErr(conn, werr)
 			}
 			conn.addBytes(skip)
 			st.AddNetwork(skip)
@@ -435,16 +439,12 @@ func (fd *fileDownload) streamBlock(ws *workerState, ctx context.Context, conn *
 				return read, ferr
 			}
 		}
-		if ws.drain.Load() {
-			flushAbort()
-			return read, errDrain
-		}
+		// Drain is deliberately not checked here: a drain-marked worker
+		// finishes its in-flight block (see workerState) and exits at the
+		// worker loop boundary. Only ctx cancellation (shutdown/fallback/
+		// stall kill) aborts mid-stream.
 		n, rerr := body.Read(space[fill:])
 		if n > 0 {
-			if werr := fd.d.cfg.Bandwidth.Wait(ctx, int64(n)); werr != nil {
-				flushAbort()
-				return read, fd.classifyReadErr(conn, werr)
-			}
 			conn.addBytes(int64(n))
 			st.AddNetwork(int64(n))
 			st.AddFile(fd.task.FileID, int64(n))
@@ -749,9 +749,6 @@ func (fd *fileDownload) fallbackStream(ctx context.Context) (string, int64, erro
 		}
 		n, rerr := body.Read(space[fill:])
 		if n > 0 {
-			if werr := fd.d.cfg.Bandwidth.Wait(attemptCtx, int64(n)); werr != nil {
-				return upstream, read, fd.classifyReadErr(conn, werr)
-			}
 			conn.addBytes(int64(n))
 			st.AddNetwork(int64(n))
 			st.AddFile(fd.task.FileID, int64(n))

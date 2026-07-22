@@ -126,6 +126,13 @@ func (r *Registry) AddNetwork(n int64) {
 	r.globalRing.Add(r.nowSec(), n)
 }
 
+// GlobalRate returns the windowed global download rate (bytes/sec over the
+// 10s ring) without building a full Snapshot; hot callers (transfer's kill
+// gate) poll it per stall window.
+func (r *Registry) GlobalRate() float64 {
+	return r.globalRing.Rate(r.nowSec())
+}
+
 // AddFile records n downloaded bytes for fileID and feeds its rate ring.
 func (r *Registry) AddFile(fileID int64, n int64) {
 	r.updateFile(fileID, func(f *fileEntry) {

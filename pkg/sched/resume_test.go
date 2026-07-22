@@ -231,23 +231,26 @@ func TestRecoverStartupRequeues(t *testing.T) {
 	}
 }
 
-// TestSetLimitsHot: bandwidth bucket and per-file conns update live; pause
-// suspends the download and install queues.
+// TestSetLimitsHot: bandwidth bucket updates live, a raised budget grows
+// per-file parallelism through rebalance, and pause suspends the download
+// and install queues.
 func TestSetLimitsHot(t *testing.T) {
 	// The hub's hold gate parks the first block request mid-flight, so the
-	// hot SetLimits deterministically lands while a deep pending backlog
+	// hot changes deterministically land while a deep pending backlog
 	// (4 MiB in 256 KiB blocks = 16 blocks) still exists — without the gate
 	// the whole job can finish before a polled gauge even observes it. The
 	// parked request keeps its concurrency slot, so the workers spawned by
-	// SetParallelism must overlap it: maxConcurrentSamePath ≥ 2 is a
-	// certainty, not a race.
+	// rebalance must overlap it: maxConcurrentSamePath ≥ 2 is a certainty,
+	// not a race.
 	want := makeContent(4<<20, 43)
 	hub := newFixtureHub(t, map[string][]byte{"big.bin": want}, "big.bin")
 	started, release := hub.holdNextResolve(1)
 	env := newTestEnv(t, hub, withLimits(func(l *config.Limits) {
-		l.Conns = 1
 		l.BlockSize = 256 << 10
 	}))
+	// Park the tuner: this test drives budget/rebalance by hand, and a live
+	// controller would swap the budget back to its own value.
+	env.manager.tuneEvery = time.Hour
 	ctx := t.Context()
 
 	if err := env.manager.Submit(ctx, Job{Repo: "org/repo"}); err != nil {
@@ -266,15 +269,16 @@ func TestSetLimitsHot(t *testing.T) {
 	// Hot bandwidth change: observable on the bucket.
 	l := env.manager.currentLimits()
 	l.MaxBandwidthBps = 12345678
-	l.Conns = 4
 	env.manager.SetLimits(l)
 	if got := env.bw.Stats().Rate; got != 12345678 {
 		t.Errorf("bandwidth bucket rate = %d, want 12345678 after SetLimits", got)
 	}
 
-	// Hot conns: the workers SetParallelism spawned lease further blocks and
-	// hit the hub while the first request is still parked. Latch the overlap
-	// before releasing the gate, then let the run finish.
+	// Raised budget: rebalance grows the active file's parallelism; the
+	// spawned workers lease further blocks and hit the hub while the first
+	// request is still parked. Latch the overlap before releasing the gate.
+	env.manager.budget.Store(4)
+	env.manager.rebalance(4)
 	waitFor(t, "grown workers overlapping the parked request", func() bool {
 		return hub.maxConcurrentSamePath() >= 2
 	})
@@ -283,7 +287,7 @@ func TestSetLimitsHot(t *testing.T) {
 		t.Fatalf("Run: %v", err)
 	}
 	if got := hub.maxConcurrentSamePath(); got < 2 {
-		t.Errorf("SetParallelism did not grow concurrency: peak concurrent requests = %d, want >= 2", got)
+		t.Errorf("rebalance did not grow concurrency: peak concurrent requests = %d, want >= 2", got)
 	}
 }
 

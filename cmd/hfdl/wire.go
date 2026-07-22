@@ -265,7 +265,7 @@ func (app *wireApp) wireComponents(ctx context.Context, p *downloadPlan, getenv 
 				"physical RAM probe failed; auto io-buffer keeps its fixed ceiling",
 				slog.Any("err", ramErr))
 		}
-		poolCap = autoIOBuffer(p.limits.Conns, totalRAM)
+		poolCap = autoIOBuffer(p.limits.MaxWorkers, totalRAM)
 	}
 	// Pass the process logger so an mmap→heap arena fallback is visible in
 	// production logs, not just under tests.
@@ -286,6 +286,13 @@ func (app *wireApp) wireComponents(ctx context.Context, p *downloadPlan, getenv 
 	// stall. The API bucket starts empty: a cold start must not fire a burst of
 	// Hub requests before the rate limit engages — pace from the first call.
 	bandwidth := throttle.NewBucket(p.limits.MaxBandwidthBps, bwBurst, bwBurst)
+	// Pace the download client at the transport so every consumer — block
+	// workers, the single-stream fallback and xet CAS fetches — shares one
+	// wire-level budget; xet cache hits never cross the transport and are
+	// never charged. The API client stays unpaced (metadata is IOPS-limited,
+	// not bandwidth-limited). Wrapping in place is safe here: no request has
+	// used dlHC yet.
+	dlHC.Transport = throttle.PacedTransport(dlHC.Transport, bandwidth)
 	api := throttle.NewBucket(p.limits.APIIOPS, p.limits.APIBurst, 1)
 	// hfdl.throttle.wait_seconds: one shared counter, each bucket labels it
 	// with its own name. Noop when telemetry is disabled.
@@ -423,7 +430,6 @@ func startRunSpan(ctx context.Context, prov *otel.Providers, p *downloadPlan) (c
 		attribute.String("revision", p.ref.Revision),
 		attribute.String("dest_mode", destMode),
 		attribute.Int("limits.max_workers", p.limits.MaxWorkers),
-		attribute.Int("limits.connections", p.limits.Conns),
 		attribute.Int64("limits.max_bandwidth_bps", p.limits.MaxBandwidthBps),
 	))
 	// Record the invocation's terminal error on the root span so a failed or

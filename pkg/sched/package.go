@@ -10,8 +10,11 @@
 // after dequeue; blocked rows are promptly deferred without consuming retry.
 //
 // Concurrency model: fixed worker pools per queue; the download queue is an
-// orchestrator that keeps at most Limits.MaxWorkers files in 'downloading',
-// each driven by one transfer.Downloader.Run call in its own goroutine.
+// orchestrator that deepens already-downloading files first (autotune.go —
+// a hill-climbed budget of up to Limits.MaxWorkers total connections,
+// oldest file filled up to one connection per remaining block) and admits
+// the next file only with connections the active set cannot use; each file
+// is driven by one transfer.Downloader.Run call in its own goroutine.
 // Block-level scheduling inside a file is transfer's job; sched supplies
 // the BlockLeaser over store.LeaseBlocks and translates completion,
 // requeue (with durable available_at backoff and give-up at 8 retries) and

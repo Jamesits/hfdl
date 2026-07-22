@@ -23,7 +23,6 @@ func TestStallBackoffLeaserWaits(t *testing.T) {
 	hub.hangLeft["m.bin"] = 1 // first GET blackholes until the stall kill
 	cap := &logCapture{}
 	env := newTestEnvLog(t, hub, slog.New(cap), withLimits(func(l *config.Limits) {
-		l.Conns = 1
 		l.StallTimeout = 300 * time.Millisecond
 	}))
 	env.manager.recoverInterval = time.Hour // no periodic Recover rescue

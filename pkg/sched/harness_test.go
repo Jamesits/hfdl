@@ -521,8 +521,7 @@ func newTestEnvLog(t *testing.T, hub *fixtureHub, log *slog.Logger, opts ...envO
 	installer := cache.NewInstaller(cs, engine, volumes, duty, log, nil)
 
 	limits := config.DefaultLimits()
-	limits.Conns = 4
-	limits.MaxWorkers = 2
+	limits.MaxWorkers = 8
 	limits.BlockSize = 1 << 20 // 1MiB blocks: multi-block even for small files
 
 	e := &testEnv{

@@ -36,8 +36,7 @@ func baseFlags() *downloadFlags {
 		repoID:         "org/repo",
 		repoType:       "model",
 		revision:       "main",
-		maxWorkers:     8,
-		connections:    8,
+		maxWorkers:     16,
 		policyStr:      "best-speed",
 		apiIOPS:        5,
 		diskActive:     100,
@@ -167,7 +166,6 @@ func TestBuildPlanFlagEnvMatrix(t *testing.T) {
 			name: "limits from flags",
 			mutate: func(f *downloadFlags) {
 				f.maxWorkers = 4
-				f.connections = 16
 				f.bandwidthStr = "500MiB/s"
 				f.apiIOPS = 9
 				f.diskActive = 55
@@ -183,8 +181,8 @@ func TestBuildPlanFlagEnvMatrix(t *testing.T) {
 			},
 			check: func(t *testing.T, p *downloadPlan) {
 				l := p.limits
-				if l.MaxWorkers != 4 || l.Conns != 16 {
-					t.Fatalf("workers/conns = %d/%d", l.MaxWorkers, l.Conns)
+				if l.MaxWorkers != 4 {
+					t.Fatalf("workers = %d", l.MaxWorkers)
 				}
 				if l.MaxBandwidthBps != 500<<20 {
 					t.Fatalf("bandwidth = %d", l.MaxBandwidthBps)
@@ -437,7 +435,6 @@ func TestBuildPlanErrors(t *testing.T) {
 		{"api-iops zero", func(f *downloadFlags) { f.apiIOPS = 0 }},
 		{"disk-active out of range", func(f *downloadFlags) { f.diskActive = 101 }},
 		{"disk-workers negative", func(f *downloadFlags) { f.diskWorkers = -1 }},
-		{"connections zero", func(f *downloadFlags) { f.connections = 0 }},
 		{"max-workers zero", func(f *downloadFlags) { f.maxWorkers = 0 }},
 		{"stall-timeout zero", func(f *downloadFlags) { f.stallTimeout = 0 }},
 		{"checkpoint-interval zero", func(f *downloadFlags) { f.checkpointIntv = 0 }},

@@ -90,8 +90,14 @@ type FileTask struct {
 // come from upstream; nil fields get safe defaults (prov is never nil in
 // production but defaults to otel.Noop anyway).
 type Config struct {
-	Log       *slog.Logger
-	HTTP      *http.Client
+	Log  *slog.Logger
+	HTTP *http.Client
+	// Bandwidth is the global download bucket. Transfer does NOT pace reads
+	// against it — pacing happens at the HTTP transport (cmd wires
+	// throttle.PacedTransport around the download client, covering the http
+	// and xet paths alike on wire bytes). It is injected here only so the
+	// killGate can read utilization and suspend throughput-based stall kills
+	// while the configured ceiling is the active constraint.
 	Bandwidth *throttle.Bucket
 	Stats     *stats.Registry
 	Engine    *fcio.Engine
@@ -117,6 +123,10 @@ type Downloader struct {
 	log    *slog.Logger
 	tracer trace.Tracer
 	events chan Event
+
+	// gate coordinates throughput-based stall kills across every file (see
+	// killgate.go); one per process, shared by all stallMonitors.
+	gate *killGate
 
 	// droppedEvents counts lifecycle events dropped because the buffer was
 	// full (a slow or gone consumer). Events feed stats/OTel only, so dropping
@@ -160,8 +170,12 @@ func NewDownloader(cfg Config) *Downloader {
 	if cfg.Prov == nil {
 		cfg.Prov = otel.Noop()
 	}
+	bw := cfg.Bandwidth
 	return &Downloader{
-		cfg:    cfg,
+		cfg: cfg,
+		gate: newKillGate(time.Now,
+			cfg.Stats.GlobalRate,
+			func() float64 { return bw.Stats().Utilization }),
 		log:    logging.Component(cfg.Log, "transfer"),
 		tracer: cfg.Prov.Tracer(otelScope),
 		events: make(chan Event, eventsCap),
@@ -327,6 +341,7 @@ func (d *Downloader) Run(ctx context.Context, t *FileTask, sink *fcio.File, prog
 		wake:      make(chan struct{}, 1),
 		attempts:  make(map[int64]int),
 	}
+	fd.stall.gate = d.gate
 	fd.seqCond = sync.NewCond(&fd.seqMu)
 	fd.workersCtx, fd.cancelWorkers = context.WithCancel(ctx)
 	defer fd.cancelWorkers()
@@ -511,7 +526,18 @@ func (fd *fileDownload) notifyWake() {
 	}
 }
 
-// setParallelism reconciles the live worker set with n.
+// setParallelism reconciles the live worker set with n. Both directions
+// count the whole set, drainers included: spawning against the total bounds
+// worker accumulation under a hot caller, and letting a reduction be
+// absorbed by workers already on their way out keeps repeated downscales
+// from cancelling ever more in-flight blocks (liveness under churn beats
+// single-call precision). Already-draining workers count toward the
+// reduction, so a repeated downscale never cancels live workers a prior
+// call's drainers already account for — otherwise churn could drain the
+// last live worker, empty the set, and latch fd.draining against any later
+// upscale. The resulting transient over/undershoot heals because the
+// scheduler re-asserts its target every tune tick, which reconciles exactly
+// once the drainers have left the set.
 func (fd *fileDownload) setParallelism(n int) {
 	fd.workersMu.Lock()
 	if fd.draining {
@@ -529,12 +555,19 @@ func (fd *fileDownload) setParallelism(n int) {
 	if n < cur {
 		k := cur - n
 		for ws := range fd.workers {
-			if k == 0 {
+			if ws.drain.Load() {
+				k--
+			}
+		}
+		for ws := range fd.workers {
+			if k <= 0 {
 				break
 			}
-			ws.drain.Store(true)
-			ws.cancel() // interrupt a blocked Lease or read: drain path flushes
-			k--
+			// Mark only; no cancel. The worker finishes its in-flight block
+			// and exits at its loop boundary (see workerState).
+			if ws.drain.CompareAndSwap(false, true) {
+				k--
+			}
 		}
 	}
 	fd.workersMu.Unlock()

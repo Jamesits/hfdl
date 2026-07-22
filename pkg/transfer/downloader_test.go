@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"log/slog"
 	"net/http"
 	"sync"
 	"testing"
@@ -34,10 +35,18 @@ func TestEventChannelSaturationNeverBlocks(t *testing.T) {
 	}
 }
 
+// TestSetParallelismConcurrentRunCompletion: a hot caller hammering
+// SetParallelism 1..8 must not livelock the run, explode the worker set, or
+// end it early — the file completes byte-for-byte. The fixture etag must
+// match the task's BlobID ("test-etag"): with a mismatch every attempt
+// fails validation and the completion assertions below would be
+// unsatisfiable (an earlier version of this test passed vacuously that
+// way — Run returned nil with zero blocks completed after churn drained
+// the whole worker set).
 func TestSetParallelismConcurrentRunCompletion(t *testing.T) {
 	size := int64(512 << 10)
 	content := newContent(71, int(size))
-	fx := newFixture(t, content, "parallelism-race")
+	fx := newFixture(t, content, "test-etag")
 	srv := fx.start()
 	leaser := newMemLeaser(size, 16<<10)
 	d := testDownloader(t)
@@ -63,6 +72,15 @@ func TestSetParallelismConcurrentRunCompletion(t *testing.T) {
 	<-done
 	if err != nil {
 		t.Fatalf("run: %v", err)
+	}
+	// Run returning nil is not enough: premature worker exhaustion with
+	// pending blocks also exits cleanly at this layer (sched re-queues).
+	// Churn must not have cost completeness.
+	if n := leaser.completedCount(); n != 32 {
+		t.Fatalf("completed blocks = %d, want 32", n)
+	}
+	if got := readSink(t, sink); string(got) != string(content) {
+		t.Fatal("content mismatch after parallelism churn")
 	}
 }
 
@@ -494,6 +512,42 @@ func TestKillAndResume(t *testing.T) {
 		t.Fatalf("resume re-downloaded everything: %d bytes", served2)
 	}
 	t.Logf("run 2 served %d bytes (durable %d, overlap is re-attempted in-flight blocks)", served2, durable)
+}
+
+// TestSetParallelismDrainAccounting: already-draining workers absorb a
+// downscale, so repeated downscales never mark live workers a prior call's
+// drainers already account for — churn cannot drain the last live worker,
+// empty the set, and latch fd.draining against later upscales.
+func TestSetParallelismDrainAccounting(t *testing.T) {
+	fd := &fileDownload{
+		workers: make(map[*workerState]struct{}),
+		log:     slog.New(slog.DiscardHandler),
+	}
+	var live *workerState
+	for i := range 4 {
+		ws := &workerState{}
+		ws.ctx, ws.cancel = context.WithCancel(t.Context())
+		if i < 3 {
+			ws.drain.Store(true)
+		} else {
+			live = ws
+		}
+		fd.workers[ws] = struct{}{}
+	}
+
+	fd.setParallelism(1) // reduction of 3 is covered by the 3 drainers
+	if live.drain.Load() {
+		t.Fatal("downscale marked the sole live worker while drainers covered the reduction")
+	}
+	fd.setParallelism(1) // repeated churn stays idempotent
+	if live.drain.Load() {
+		t.Fatal("repeated downscale marked the sole live worker")
+	}
+	// A target below the live count must still reach live workers.
+	fd.setParallelism(0)
+	if !live.drain.Load() {
+		t.Fatal("downscale below the drainer count did not mark a live worker")
+	}
 }
 
 // TestSetParallelismLive: hot scale-up spawns workers (observed via

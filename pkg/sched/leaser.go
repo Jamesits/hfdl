@@ -138,6 +138,11 @@ func (l *blockLeaser) Complete(ctx context.Context, b transfer.Block) error {
 	if err != nil {
 		return err // fenced or DB failure: the run must abort
 	}
+	// Only durably completed blocks shrink the file's remaining-work
+	// counter (admission/rebalance input): wire-byte progress would free
+	// budget while the block is still leased and its worker still holds a
+	// connection.
+	l.m.noteBlockDone(l.fileID, b.Length)
 	if !fileDone {
 		return nil
 	}

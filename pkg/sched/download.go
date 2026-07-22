@@ -15,10 +15,17 @@ import (
 	"github.com/jamesits/hfdl/pkg/xet"
 )
 
-// downloadOrchestrator keeps at most Limits.MaxWorkers files in
-// 'downloading': it runs the salvage gate, prepares the transfer
-// task (progress load → re-chunk → pending blocks) and hands each file to
-// one transfer.Downloader.Run in its own goroutine.
+// errAdmissionDenied backs a prepared file out to 'queued' when the
+// admission cap dropped between the orchestrator's pre-check and the atomic
+// insert (tune revert or SetLimits clamp); the orchestrator re-admits it
+// when the budget allows.
+var errAdmissionDenied = errors.New("sched: connection budget dropped during admission")
+
+// downloadOrchestrator admits files into 'downloading' under the live
+// connection budget (each active file holds at least one connection; see
+// autotune.go): it runs the salvage gate, prepares the transfer task
+// (progress load → re-chunk → pending blocks) and hands each file to one
+// transfer.Downloader.Run in its own goroutine.
 func (m *Manager) downloadOrchestrator(ctx context.Context) {
 	defer m.wg.Done()
 	for {
@@ -38,11 +45,11 @@ func (m *Manager) downloadOrchestrator(ctx context.Context) {
 			continue
 		}
 
-		limits := m.currentLimits()
-		maxWorkers := max(limits.MaxWorkers, 1)
-		m.activeMu.Lock()
-		free := maxWorkers - len(m.active)
-		m.activeMu.Unlock()
+		// Admission is headroom-driven: a new file starts only with
+		// committed-budget connections the already-downloading files cannot
+		// put to work (one per remaining block) — deepen the current files
+		// first, widen to the next file only when parallelism allows.
+		free := m.spareConns()
 		if free <= 0 {
 			if !m.waitForWork(ctx, m.wakeDownload) {
 				return
@@ -60,13 +67,15 @@ func (m *Manager) downloadOrchestrator(ctx context.Context) {
 		}
 		started := false
 		for i := range files {
-			m.activeMu.Lock()
-			_, isActive := m.active[files[i].ID]
-			atCap := len(m.active) >= maxWorkers
-			m.activeMu.Unlock()
-			if atCap {
+			// Recompute headroom per admission: a tune revert, SetLimits
+			// clamp or the previous admission consuming the spare budget
+			// mid-batch must stop further admissions immediately.
+			if m.spareConns() <= 0 {
 				break
 			}
+			m.activeMu.Lock()
+			_, isActive := m.active[files[i].ID]
+			m.activeMu.Unlock()
 			if isActive {
 				continue
 			}
@@ -243,7 +252,10 @@ func (m *Manager) startDownload(ctx context.Context, f *store.File) (launched bo
 
 	blockSize := limits.BlockSize
 	if blockSize <= 0 {
-		blockSize = transfer.AdaptiveBlockSize(f.Size, limits.Conns)
+		// Chunking is done once at file start while the live connection count
+		// floats with the budget, so the adaptive size pivots on a fixed
+		// count rather than the controller's momentary state.
+		blockSize = transfer.AdaptiveBlockSize(f.Size, blockPivotConns)
 	}
 	bounds := missing
 	if src != nil {
@@ -294,7 +306,6 @@ func (m *Manager) startDownload(ctx context.Context, f *store.File) (launched bo
 		Upstreams:     upstreams,
 		Policy:        limits.UpstreamPolicy,
 		BlockSize:     blockSize,
-		Conns:         max(limits.Conns, 1),
 		StallWindow:   limits.StallTimeout,
 		StallMinBytes: limits.StallMinBytes,
 		Leaser:        leaser,
@@ -302,10 +313,26 @@ func (m *Manager) startDownload(ctx context.Context, f *store.File) (launched bo
 		Sequential:    limits.IOMode == config.IOSequential,
 	}
 
+	// admitFile atomically re-checks the headroom, inserts into the active
+	// set, and re-splits the budget over the grown set (shrinking the
+	// existing files' shares) so the total assigned never exceeds the budget
+	// at admission. Denial means the headroom vanished since the loop's
+	// pre-check (tune revert / SetLimits clamp / concurrent admission): back
+	// the file out to queued and let the orchestrator re-admit it when the
+	// budget allows.
+	var missingBytes int64
+	for i := range blocks {
+		missingBytes += blocks[i].Length
+	}
 	fileCtx, cancel := context.WithCancel(ctx)
-	m.activeMu.Lock()
-	m.active[f.ID] = &activeFile{file: *f, conns: task.Conns, cancel: cancel}
-	m.activeMu.Unlock()
+	conns, ok := m.admitFile(f, blockSize, missingBytes, cancel)
+	if !ok {
+		cancel()
+		_ = sink.Close()
+		m.resetFileToQueued(ctx, f, tok, errAdmissionDenied)
+		return false, nil
+	}
+	task.Conns = conns
 	m.wg.Add(1)
 	go m.runFile(fileCtx, cancel, f, tok, task, sink, leaser)
 	return true, nil

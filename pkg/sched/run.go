@@ -82,6 +82,9 @@ func (m *Manager) Run(ctx context.Context) error {
 		m.wg.Add(1)
 		go m.downloadOrchestrator(runCtx)
 
+		m.wg.Add(1)
+		go m.tuneLoop(runCtx)
+
 		diskOverride := m.currentLimits().DiskWorkers
 		diskN := diskWorkerCount(fs, diskOverride)
 		if hardCap := maxDiskWorkers(); diskOverride > hardCap {
