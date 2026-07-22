@@ -24,4 +24,10 @@ High-speed Hugging Face downloader.
 - Same-file comparison must use OS API instead of fiddling with string based path separator replacements
 
 ## Development
-Always perform a full rebuild with `goreleaser build --snapshot --clean`, and use the artifacts under `dist/`. When compiling individual programs for testing, output to `out/`. Run `go vet ./...` (must be run in `GOOS`/`GOARCH` matrix), `golangci-lint run` and `go fmt ./...` after code change.
+Always perform a full rebuild with `goreleaser build --snapshot --clean`, and use the artifacts under `dist/`. When compiling individual programs for testing, output to `out/`.
+
+After code change, verify with:
+- `go vet ./...` (must be run in `GOOS`/`GOARCH` matrix)
+- `golangci-lint run`
+- `find . -name "*.go" -not -path "./vendor/*" | xargs gopls check -severity=hint | grep -vE "\[.*(aix|ppc64|js|wasm).*\]$"`
+- `go fmt ./...`
