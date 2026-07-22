@@ -165,7 +165,11 @@ func (in *Installer) installCache(ctx context.Context, r InstallRequest, blobPat
 		return "", err
 	}
 
-	final, err := SafeJoin(r.CacheDir, filepath.Join(dirName, "snapshots", r.CommitSHA, r.RepoPath))
+	// dirName and CommitSHA are validated single components above, so they
+	// belong in the root, not the checked path: joining them into p with
+	// filepath.Join would introduce backslashes on Windows, which
+	// validateRepoPath rejects (it accepts forward-slash repo paths only).
+	final, err := SafeJoin(filepath.Join(base, "snapshots", r.CommitSHA), r.RepoPath)
 	if err != nil {
 		return "", err
 	}
