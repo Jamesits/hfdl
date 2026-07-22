@@ -48,17 +48,17 @@ func fnmatchTranslate(pat string) string {
 			} else if strings.HasPrefix(stuff, "^") {
 				stuff = `\` + stuff
 			}
+			b.WriteString("[")
 			// Escape regex metachars inside the class except class syntax.
-			var sb strings.Builder
 			for _, r := range stuff {
 				switch r {
 				case '\\':
-					sb.WriteString(`\\`)
+					b.WriteString(`\\`)
 				default:
-					sb.WriteRune(r)
+					b.WriteRune(r)
 				}
 			}
-			b.WriteString("[" + sb.String() + "]")
+			b.WriteString("]")
 			i = j + 1
 		default:
 			b.WriteString(regexp.QuoteMeta(string(c)))
