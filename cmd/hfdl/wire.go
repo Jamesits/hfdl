@@ -276,8 +276,13 @@ func (app *wireApp) wireComponents(ctx context.Context, p *downloadPlan, getenv 
 	engine.SetPool(pool)
 	volumes := fcio.NewVolumeSet()
 
-	// 5. Blob cache + verifier + downloader.
-	blobs, err := cache.OpenStore(ctx, p.cacheDir, engine, log)
+	// 5. Blob cache + verifier + downloader. The blob store, its in-flight
+	// staging and the state DB all live under p.workRoot (the HF cache in cache
+	// mode, or <localDir>/.cache/huggingface in --local-dir mode), so local-dir
+	// downloads are self-contained and concurrency-safe. The xet chunk cache
+	// below stays on the shared HF cache (p.cacheDir): it is content-addressed
+	// and meant to be shared, mirroring HF_XET_CACHE.
+	blobs, err := cache.OpenStore(ctx, p.workRoot, engine, log)
 	if err != nil {
 		return err
 	}
@@ -303,10 +308,12 @@ func (app *wireApp) wireComponents(ctx context.Context, p *downloadPlan, getenv 
 	bandwidth.SetWaitCounter(waitSeconds, "bandwidth")
 	api.SetWaitCounter(waitSeconds, "api")
 	duty := throttle.NewDutyLimiter(p.limits.DiskActivePct, throttle.MediaUnknown)
-	// Probe the cache filesystem once: the duty derate depends on media class.
-	if fsType, err := fcio.ProbeFs(ctx, p.cacheDir); err != nil {
+	// Probe the blob store's filesystem once: the duty derate depends on media
+	// class, and blobs are written under p.workRoot (which differs from the HF
+	// cache in --local-dir mode).
+	if fsType, err := fcio.ProbeFs(ctx, p.workRoot); err != nil {
 		log.LogAttrs(ctx, slog.LevelWarn, "filesystem probe failed, duty limiter assumes unknown media",
-			slog.String("path", p.cacheDir), slog.Any("err", err))
+			slog.String("path", p.workRoot), slog.Any("err", err))
 	} else {
 		duty.SetMedia(mediaClass(fsType))
 	}

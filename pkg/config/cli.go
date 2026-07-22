@@ -89,12 +89,29 @@ func Endpoints(flag []string, getenv func(string) string) []string {
 	return []string{DefaultEndpoint}
 }
 
-// StateDBPath resolves --state-db → <cache>/.hfdl/state.db.
-func StateDBPath(flag, cacheDir string) string {
+// WorkRoot is the per-download bookkeeping root: the directory the state DB and
+// the blob store/staging are rooted at. In cache mode it is cacheDir; in
+// --local-dir mode it is <localDir>/.cache/huggingface — hf already git-ignores
+// and tags that directory, and it shares the local dir's filesystem, so the
+// blob store's link(2)/reflink stay cheap. Rooting the DB (and its exclusive
+// process lock) here is what lets independent downloads to different local dirs
+// run concurrently. localDir, when non-empty, should already be absolute.
+func WorkRoot(localDir, cacheDir string) string {
+	if localDir != "" {
+		return filepath.Join(localDir, ".cache", "huggingface")
+	}
+	return cacheDir
+}
+
+// StateDBPath resolves --state-db → <dest>/.hfdl/state.db, where dest is the
+// per-download work root (see WorkRoot). Rooting the DB — and its exclusive
+// process lock — under the destination is what lets independent downloads to
+// different local dirs run concurrently.
+func StateDBPath(flag, destDir string) string {
 	if flag != "" {
 		return flag
 	}
-	return filepath.Join(cacheDir, ".hfdl", "state.db")
+	return filepath.Join(destDir, ".hfdl", "state.db")
 }
 
 // Offline reports HF_HUB_OFFLINE truthiness (cache hits served, network fails).

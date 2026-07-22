@@ -116,7 +116,7 @@ func newDownloadCmd() *cobra.Command {
 	fl.StringVar(&f.ioModeStr, "hfdl-io-mode", config.IOBuffered.String(), "storage IO mode: buffered|direct|sequential")
 	fl.StringVar(&f.ioBufferStr, "hfdl-io-buffer", "", "RAM write-cache pool cap (default auto: clamp(slab*connections*2, 64MiB, 1GiB), capped at half of system RAM)")
 	fl.DurationVar(&f.checkpointIntv, "hfdl-checkpoint-interval", dfl.CheckpointInterval, "durable progress cadence (flush/fsync/persist)")
-	fl.StringVar(&f.stateDBFlag, "hfdl-state-db", "", "state database path (default <cache>/.hfdl/state.db)")
+	fl.StringVar(&f.stateDBFlag, "hfdl-state-db", "", "state database path (default <dest>/.hfdl/state.db, per destination so different --local-dir downloads run concurrently)")
 	fl.StringVar(&f.logLevelStr, "hfdl-log-level", "info", "log level: debug|info|warn|error")
 	fl.BoolVar(&f.noTUI, "hfdl-no-tui", false, "disable the interactive TUI")
 	fl.StringVar(&f.proxyStr, "hfdl-proxy", netcfg.SpecSystem,
@@ -135,6 +135,7 @@ type downloadPlan struct {
 	limits    config.Limits
 	endpoints []string
 	cacheDir  string
+	workRoot  string // per-download bookkeeping root: cacheDir, or <localDir>/.cache/huggingface in --local-dir mode. Roots the state DB and blob store.
 	token     string
 	quiet     bool
 	noTUI     bool
@@ -242,11 +243,19 @@ func buildPlan(f *downloadFlags, getenv func(string) string) (*downloadPlan, err
 		cacheDir = abs
 	}
 
+	// workRoot is where this download's private bookkeeping (state DB, blob
+	// store, in-flight staging) lives — the shared HF cache in cache mode, or
+	// the local dir's .cache/huggingface in --local-dir mode — so each local-dir
+	// download is self-contained (its own DB lock and staging) and independent
+	// downloads run concurrently. f.localDir is already absolute here.
+	workRoot := config.WorkRoot(f.localDir, cacheDir)
+
 	p := &downloadPlan{
 		ref:       hfapi.RepoRef{RepoType: ref.RepoType, Repo: ref.Repo, Revision: revision},
 		limits:    limits,
 		endpoints: endpoints,
 		cacheDir:  cacheDir,
+		workRoot:  workRoot,
 		token:     hfapi.ResolveToken(f.tokenFlag, getenv),
 		quiet:     f.quiet,
 		noTUI:     f.noTUI,
@@ -271,7 +280,7 @@ func buildPlan(f *downloadFlags, getenv func(string) string) (*downloadPlan, err
 		MaxWorkers:    f.maxWorkers,
 		Endpoints:     endpoints,
 		References:    f.references,
-		StateDB:       config.StateDBPath(f.stateDBFlag, cacheDir),
+		StateDB:       config.StateDBPath(f.stateDBFlag, workRoot),
 		LogLevel:      f.logLevelStr,
 		NoTUI:         f.noTUI,
 		Proxy:         proxy.String(),

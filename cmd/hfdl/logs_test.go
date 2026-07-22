@@ -93,3 +93,21 @@ func TestRunLogs(t *testing.T) {
 		}
 	})
 }
+
+// TestRunLogsLocalDir proves `hfdl logs --local-dir` reads the per-destination
+// state db under <localDir>/.cache/huggingface/.hfdl/state.db (where a
+// --local-dir download writes it) rather than the HF cache.
+func TestRunLogsLocalDir(t *testing.T) {
+	localDir := t.TempDir()
+	dbPath := filepath.Join(localDir, ".cache", "huggingface", ".hfdl", "state.db")
+	seedLogs(t, dbPath)
+
+	var out bytes.Buffer
+	f := &logsFlags{levelStr: "debug", localDir: localDir}
+	if err := runLogs(t.Context(), f, getenvMap(nil), &out); err != nil {
+		t.Fatal(err)
+	}
+	if got := out.String(); !strings.Contains(got, "job started") {
+		t.Fatalf("expected seeded rows from local-dir db, got %q", got)
+	}
+}

@@ -115,6 +115,10 @@ func TestBuildPlanFlagEnvMatrix(t *testing.T) {
 				if p.cacheDir != want {
 					t.Fatalf("cacheDir = %q", p.cacheDir)
 				}
+				// Cache mode: the work root is the HF cache itself.
+				if p.workRoot != want {
+					t.Fatalf("workRoot = %q, want %q", p.workRoot, want)
+				}
 				if p.cli.StateDB != filepath.Join(want, ".hfdl", "state.db") {
 					t.Fatalf("stateDB = %q", p.cli.StateDB)
 				}
@@ -138,6 +142,24 @@ func TestBuildPlanFlagEnvMatrix(t *testing.T) {
 			check: func(t *testing.T, p *downloadPlan) {
 				if want := absPath(t, "/tmp/hfhome/hub"); p.cacheDir != want {
 					t.Fatalf("cacheDir = %q", p.cacheDir)
+				}
+			},
+		},
+		{
+			// --local-dir roots the work set (state DB + blob store) under the
+			// local dir's .cache/huggingface, not the shared HF cache, so two
+			// local-dir downloads don't contend on one state-db lock.
+			name: "--local-dir state db is per destination",
+			mutate: func(f *downloadFlags) {
+				f.localDir = "/out/models"
+			},
+			check: func(t *testing.T, p *downloadPlan) {
+				wantRoot := absPath(t, "/out/models/.cache/huggingface")
+				if p.workRoot != wantRoot {
+					t.Fatalf("workRoot = %q, want %q", p.workRoot, wantRoot)
+				}
+				if want := filepath.Join(wantRoot, ".hfdl", "state.db"); p.cli.StateDB != want {
+					t.Fatalf("stateDB = %q, want %q", p.cli.StateDB, want)
 				}
 			},
 		},
