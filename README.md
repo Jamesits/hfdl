@@ -8,10 +8,13 @@
 
 Drop-in replacement of `hf download` that:
 
-- Does not break on a slow HDD and a fast network
-- Does not request 114514G RAM and DoS your disk for "high performance"
-- Can set network speed limits on the fly
-- And still performant!
+- Does not freak out on a slow disk (even if an HDD)
+- Does not consume 114514G RAM and DoS your disk for so-called "high performance" mode
+- Does not get rewrited in Rust for no reason
+- Has a proper TUI instead of progress bars mixed with partial logs
+- Can adjust network speed limits on the fly
+- Is end-to-end OTLP traced
+- And performant!
 
 ## Usage
 
@@ -129,3 +132,25 @@ To decrease CPU usage:
 To limit RAM usage:
 
 - Decrease `--hfdl-io-buffer`
+
+## Development
+
+Compiling:
+
+```shell
+goreleaser release --snapshot --clean
+```
+
+### OpenTelemetry
+
+All your expected OTLP environment variables work. Example:
+
+```shell
+export OTEL_EXPORTER_OTLP_ENDPOINT=http://localhost:4318
+hfdl download [args...]
+```
+
+Notes:
+
+- Set `OTEL_METRIC_EXPORT_INTERVAL` (milliseconds) for adjusting metric intervals
+- Setting any of `OTEL_EXPORTER_OTLP_{,TRACES_,METRICS_,LOGS_}{TIMEOUT,CERTIFICATE,CLIENT_CERTIFICATE,CLIENT_KEY}` voids `--hfdl-proxy`/`--hfdl-ipqos` for OTLP traffic
