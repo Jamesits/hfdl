@@ -41,6 +41,8 @@ type CLI struct {
 	StateDB    string
 	LogLevel   string
 	NoTUI      bool
+	Proxy      string // normalized --hfdl-proxy spec (netcfg.ParseProxy)
+	IPQoS      string // normalized --hfdl-ipqos spec (netcfg.ParseIPQoS)
 }
 
 // CacheDir resolves --cache-dir → HF_HUB_CACHE → <HF_HOME>/hub (huggingface_hub

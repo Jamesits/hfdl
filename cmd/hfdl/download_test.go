@@ -9,6 +9,7 @@ import (
 
 	"github.com/jamesits/hfdl/pkg/config"
 	"github.com/jamesits/hfdl/pkg/hfapi"
+	"github.com/jamesits/hfdl/pkg/netcfg"
 	"github.com/jamesits/hfdl/pkg/sched"
 )
 
@@ -246,6 +247,35 @@ func TestBuildPlanFlagEnvMatrix(t *testing.T) {
 			},
 		},
 		{
+			name: "proxy and ipqos flags",
+			mutate: func(f *downloadFlags) {
+				f.proxyStr = "socks5h://127.0.0.1:1080"
+				f.ipqosStr = "af21,0x20,none"
+			},
+			check: func(t *testing.T, p *downloadPlan) {
+				if p.proxy.Mode != netcfg.ProxyURL || p.cli.Proxy != "socks5h://127.0.0.1:1080" {
+					t.Fatalf("proxy = %+v / %q", p.proxy, p.cli.Proxy)
+				}
+				if p.qos.API != 0x48 || p.qos.Download != 0x20 || p.qos.Telemetry != netcfg.TOSNone {
+					t.Fatalf("qos = %+v", p.qos)
+				}
+				if p.cli.IPQoS != "af21,0x20,none" {
+					t.Fatalf("cli.IPQoS = %q", p.cli.IPQoS)
+				}
+			},
+		},
+		{
+			name: "defaults: system proxy, af21/cs1 qos",
+			check: func(t *testing.T, p *downloadPlan) {
+				if p.proxy.Mode != netcfg.ProxySystem || p.cli.Proxy != "system" {
+					t.Fatalf("proxy = %+v / %q", p.proxy, p.cli.Proxy)
+				}
+				if p.qos.API != 0x48 || p.qos.Download != 0x20 || p.qos.Telemetry != 0x20 {
+					t.Fatalf("qos = %+v", p.qos)
+				}
+			},
+		},
+		{
 			name: "explicit --state-db",
 			mutate: func(f *downloadFlags) {
 				f.stateDBFlag = "/tmp/custom/state.db"
@@ -387,6 +417,11 @@ func TestBuildPlanErrors(t *testing.T) {
 		{"max-workers zero", func(f *downloadFlags) { f.maxWorkers = 0 }},
 		{"stall-timeout zero", func(f *downloadFlags) { f.stallTimeout = 0 }},
 		{"checkpoint-interval zero", func(f *downloadFlags) { f.checkpointIntv = 0 }},
+		{"bad proxy scheme", func(f *downloadFlags) { f.proxyStr = "ftp://proxy.example" }},
+		{"proxy missing host", func(f *downloadFlags) { f.proxyStr = "http://" }},
+		{"bad ipqos keyword", func(f *downloadFlags) { f.ipqosStr = "warp-speed" }},
+		{"ipqos too many values", func(f *downloadFlags) { f.ipqosStr = "af21,cs1,le,ef" }},
+		{"ipqos space separated", func(f *downloadFlags) { f.ipqosStr = "af21 cs1" }},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {

@@ -15,7 +15,7 @@ import (
 func TestSetupDisabled(t *testing.T) {
 	before := runtime.NumGoroutine()
 
-	p, err := Setup(t.Context(), mapGetenv(map[string]string{}), "test", nil, nil)
+	p, err := Setup(t.Context(), mapGetenv(map[string]string{}), "test", nil, nil, nil)
 	if err != nil {
 		t.Fatalf("Setup: %v", err)
 	}

@@ -4,7 +4,6 @@ import (
 	"context"
 	"fmt"
 	"log/slog"
-	"net"
 	"net/http"
 	"os"
 	"path/filepath"
@@ -15,6 +14,7 @@ import (
 	"github.com/jamesits/hfdl/pkg/fcio"
 	"github.com/jamesits/hfdl/pkg/hfapi"
 	"github.com/jamesits/hfdl/pkg/logging"
+	"github.com/jamesits/hfdl/pkg/netcfg"
 	"github.com/jamesits/hfdl/pkg/otel"
 	"github.com/jamesits/hfdl/pkg/sched"
 	"github.com/jamesits/hfdl/pkg/stats"
@@ -36,6 +36,10 @@ const (
 	// logRetainCount is the startup logs-table retention: prune to the
 	// newest 50k rows.
 	logRetainCount = 50_000
+	// otlpHTTPTimeout mirrors the OTLP exporter default request timeout,
+	// which WithHTTPClient bypasses (the injected client's Timeout applies
+	// instead).
+	otlpHTTPTimeout = 10 * time.Second
 	// fcioPoolSlab is the fcio buffer pool slab size: 8MiB, FastCopy
 	// mainBuf-style.
 	fcioPoolSlab = 8 << 20
@@ -89,6 +93,10 @@ type wireApp struct {
 	pool    *fcio.Pool
 	manager manager
 	stashed *config.Limits // pre-pause limits for the TUI pause toggle
+
+	// proxyFn is resolved once in wireTelemetry (system mode may query the
+	// platform proxy store) and shared by every transport built afterwards.
+	proxyFn netcfg.ProxyFn
 
 	// Kept for the otel metrics adapter: gauges read bucket/duty/stats
 	// state that sched's snapshot does not duplicate (utilization, waiters,
@@ -159,12 +167,24 @@ func wireTelemetry(ctx context.Context, p *downloadPlan, getenv func(string) str
 	log := slog.New(handler)
 
 	app := &wireApp{log: log, handler: handler, ring: ring}
+	app.proxyFn = p.proxy.ProxyFunc(ctx, log)
 
 	// Telemetry (env-only; disabled → noop providers). Built before the store
 	// so the hfdl.run span opened next can wrap the store/cache/probe wiring.
 	prov := otel.Noop()
 	if otel.Enabled(getenv) {
-		setup, err := otel.Setup(ctx, getenv, config.VersionString(), &metricsSource{app: app}, log)
+		// Telemetry sockets get the telemetry QoS class and the same proxy
+		// resolution as the rest of hfdl. The client timeout mirrors the OTLP
+		// default (10s), since WithHTTPClient bypasses the exporter's own
+		// timeout handling.
+		egress := &otel.Egress{
+			HTTPClient: &http.Client{
+				Transport: netcfg.Transport(app.proxyFn, p.qos.Telemetry, log),
+				Timeout:   otlpHTTPTimeout,
+			},
+			GRPCDialer: netcfg.GRPCDialer(p.qos.Telemetry, log),
+		}
+		setup, err := otel.Setup(ctx, getenv, config.VersionString(), &metricsSource{app: app}, log, egress)
 		if err != nil {
 			_ = handler.Close(ctx)
 			return nil, fmt.Errorf("otel setup: %w", err)
@@ -203,9 +223,12 @@ func (app *wireApp) wireComponents(ctx context.Context, p *downloadPlan, getenv 
 	}
 	handler.AttachDB(ctx, st)
 
-	// 2. Shared HTTP client: tuned transport, otelhttp on top, no global
-	// timeout (response timeouts live on the hfapi client).
-	hc := &http.Client{Transport: prov.HTTPTransport(newTransport())}
+	// 2. HTTP clients: tuned transports, otelhttp on top, no global timeout
+	// (response timeouts live on the hfapi client). API and download traffic
+	// get separate connection pools so their IP QoS classes never share a
+	// socket; both reuse the proxy resolved in wireTelemetry.
+	apiHC := &http.Client{Transport: prov.HTTPTransport(netcfg.Transport(app.proxyFn, p.qos.API, log))}
+	dlHC := &http.Client{Transport: prov.HTTPTransport(netcfg.Transport(app.proxyFn, p.qos.Download, log))}
 
 	// 3. Hub API clients, one per endpoint (first = primary; the rest are
 	// payload mirrors — CAS tokens always come from the primary Hub endpoint).
@@ -219,7 +242,7 @@ func (app *wireApp) wireComponents(ctx context.Context, p *downloadPlan, getenv 
 	}
 	clients := make(map[string]*hfapi.Client, len(p.endpoints))
 	for _, ep := range p.endpoints {
-		c := hfapi.NewClient(log, hc, ep, p.token, etagTimeout)
+		c := hfapi.NewClient(log, apiHC, ep, p.token, etagTimeout)
 		c.SetTracer(prov.Tracer("hfdl.hfapi"))
 		c.SetRequestCounter(apiRequests)
 		clients[ep] = c
@@ -279,7 +302,7 @@ func (app *wireApp) wireComponents(ctx context.Context, p *downloadPlan, getenv 
 	app.reg = reg
 	dl := transfer.NewDownloader(transfer.Config{
 		Log:                log,
-		HTTP:               hc,
+		HTTP:               dlHC,
 		Bandwidth:          bandwidth,
 		Stats:              reg,
 		Engine:             engine,
@@ -300,7 +323,8 @@ func (app *wireApp) wireComponents(ctx context.Context, p *downloadPlan, getenv 
 	} else {
 		xcfg.CacheDir = filepath.Join(p.cacheDir, "xet")
 	}
-	xc := xet.NewClient(log, hc, xcfg, primary.XetToken, prov)
+	// Xet CAS traffic is payload: download class.
+	xc := xet.NewClient(log, dlHC, xcfg, primary.XetToken, prov)
 
 	installer := cache.NewInstaller(blobs, engine, volumes, duty, log, prov)
 
@@ -522,25 +546,6 @@ func adaptStats(s *sched.Stats) *tui.Snapshot {
 		out.Cooldowns[i] = tui.CooldownInfo{Target: c.Target, Kind: c.Kind, Remaining: c.Remaining}
 	}
 	return out
-}
-
-// newTransport builds the shared tuned transport: keepalive, dual stack,
-// generous pools, and no global request timeout (transfer/hfapi layer
-// response timeouts per request instead).
-func newTransport() *http.Transport {
-	return &http.Transport{
-		Proxy: http.ProxyFromEnvironment,
-		DialContext: (&net.Dialer{
-			Timeout:   30 * time.Second,
-			KeepAlive: 30 * time.Second,
-			DualStack: true,
-		}).DialContext,
-		MaxIdleConns:          128,
-		MaxIdleConnsPerHost:   32,
-		IdleConnTimeout:       90 * time.Second,
-		TLSHandshakeTimeout:   10 * time.Second,
-		ExpectContinueTimeout: 1 * time.Second,
-	}
 }
 
 func ioTier(m config.IOMode) fcio.IOTier {

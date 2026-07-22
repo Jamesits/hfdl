@@ -169,7 +169,7 @@ func TestSetupExportsAllSignals(t *testing.T) {
 	t.Setenv("OTEL_BSP_SCHEDULE_DELAY", "100")
 
 	src := &fakeSource{m: fullMetrics()}
-	p, err := Setup(t.Context(), os.Getenv, "1.2.3-test", src, nil)
+	p, err := Setup(t.Context(), os.Getenv, "1.2.3-test", src, nil, nil)
 	if err != nil {
 		t.Fatalf("Setup: %v", err)
 	}
@@ -248,7 +248,7 @@ func TestSetupSignalToggles(t *testing.T) {
 	t.Setenv("OTEL_BSP_SCHEDULE_DELAY", "100")
 
 	src := &fakeSource{m: fullMetrics()}
-	p, err := Setup(t.Context(), os.Getenv, "1.0.0", src, nil)
+	p, err := Setup(t.Context(), os.Getenv, "1.0.0", src, nil, nil)
 	if err != nil {
 		t.Fatalf("Setup: %v", err)
 	}
@@ -288,7 +288,7 @@ func TestHTTPTransportEnabled(t *testing.T) {
 	t.Setenv("OTEL_METRICS_EXPORTER", "none")
 	t.Setenv("OTEL_LOGS_EXPORTER", "none")
 
-	p, err := Setup(t.Context(), os.Getenv, "1.0.0", nil, nil)
+	p, err := Setup(t.Context(), os.Getenv, "1.0.0", nil, nil, nil)
 	if err != nil {
 		t.Fatalf("Setup: %v", err)
 	}

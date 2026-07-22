@@ -22,6 +22,7 @@ import (
 	"go.opentelemetry.io/otel/sdk/resource"
 	sdktrace "go.opentelemetry.io/otel/sdk/trace"
 	semconv "go.opentelemetry.io/otel/semconv/v1.37.0"
+	"google.golang.org/grpc"
 
 	"github.com/jamesits/hfdl/pkg/config"
 )
@@ -43,8 +44,10 @@ const serviceName = "hfdl"
 //
 // src feeds the async gauges once per collection tick; nil skips gauge
 // registration. log receives export-failure reports (best-effort: failures
-// are counted and logged, never propagated to callers).
-func Setup(ctx context.Context, getenv func(string) string, version string, src MetricsSource, log *slog.Logger) (*Providers, error) {
+// are counted and logged, never propagated to callers). egress supplies the
+// caller-built HTTP client / gRPC dialer for exporter sockets; nil keeps the
+// exporters' env-driven defaults.
+func Setup(ctx context.Context, getenv func(string) string, version string, src MetricsSource, log *slog.Logger, egress *Egress) (*Providers, error) {
 	if !Enabled(getenv) {
 		return Noop(), nil
 	}
@@ -99,7 +102,7 @@ func Setup(ctx context.Context, getenv func(string) string, version string, src 
 			}
 			sampler = sdktrace.ParentBased(sdktrace.AlwaysSample())
 		}
-		tp, err := setupTracer(ctx, getenv, res, sampler)
+		tp, err := setupTracer(ctx, getenv, res, sampler, egress, log)
 		if err != nil {
 			return fail(err)
 		}
@@ -110,7 +113,7 @@ func Setup(ctx context.Context, getenv func(string) string, version string, src 
 	if on, unknown := signalExporter(getenv, "METRICS"); unknown != "" {
 		errHandler.logUnknown(envMetricsExporter, unknown)
 	} else if on {
-		mp, err := setupMeter(ctx, getenv, res, src)
+		mp, err := setupMeter(ctx, getenv, res, src, egress, log)
 		if err != nil {
 			return fail(err)
 		}
@@ -121,7 +124,7 @@ func Setup(ctx context.Context, getenv func(string) string, version string, src 
 	if on, unknown := signalExporter(getenv, "LOGS"); unknown != "" {
 		errHandler.logUnknown(envLogsExporter, unknown)
 	} else if on {
-		lp, err := setupLogger(ctx, getenv, res)
+		lp, err := setupLogger(ctx, getenv, res, egress, log)
 		if err != nil {
 			return fail(err)
 		}
@@ -139,15 +142,23 @@ func Setup(ctx context.Context, getenv func(string) string, version string, src 
 // setupTracer builds the SDK TracerProvider. The SDK honors
 // OTEL_TRACES_SAMPLER(+_ARG) with a parentbased_always_on default, and the
 // batch processor honors OTEL_BSP_*; exporters read OTEL_EXPORTER_OTLP_*.
-func setupTracer(ctx context.Context, getenv func(string) string, res *resource.Resource, sampler sdktrace.Sampler) (*sdktrace.TracerProvider, error) {
+func setupTracer(ctx context.Context, getenv func(string) string, res *resource.Resource, sampler sdktrace.Sampler, egress *Egress, log *slog.Logger) (*sdktrace.TracerProvider, error) {
 	var (
 		exp sdktrace.SpanExporter
 		err error
 	)
 	if protocolFor(getenv, "TRACES") == "grpc" {
-		exp, err = otlptracegrpc.New(ctx)
+		var opts []otlptracegrpc.Option
+		if d := egress.grpcDialer(); d != nil {
+			opts = append(opts, otlptracegrpc.WithDialOption(grpc.WithContextDialer(d)))
+		}
+		exp, err = otlptracegrpc.New(ctx, opts...)
 	} else {
-		exp, err = otlptracehttp.New(ctx)
+		var opts []otlptracehttp.Option
+		if hc := egress.httpClient(getenv, "TRACES", log); hc != nil {
+			opts = append(opts, otlptracehttp.WithHTTPClient(hc))
+		}
+		exp, err = otlptracehttp.New(ctx, opts...)
 	}
 	if err != nil {
 		return nil, fmt.Errorf("otel: trace exporter: %w", err)
@@ -196,15 +207,23 @@ func traceSampler(getenv func(string) string) (sdktrace.Sampler, error) {
 // setupMeter builds the SDK MeterProvider with a periodic reader on the
 // 15s tick (OTEL_METRIC_EXPORT_INTERVAL overrides it) and
 // registers the async gauges against src.
-func setupMeter(ctx context.Context, getenv func(string) string, res *resource.Resource, src MetricsSource) (*sdkmetric.MeterProvider, error) {
+func setupMeter(ctx context.Context, getenv func(string) string, res *resource.Resource, src MetricsSource, egress *Egress, log *slog.Logger) (*sdkmetric.MeterProvider, error) {
 	var (
 		exp sdkmetric.Exporter
 		err error
 	)
 	if protocolFor(getenv, "METRICS") == "grpc" {
-		exp, err = otlpmetricgrpc.New(ctx)
+		var opts []otlpmetricgrpc.Option
+		if d := egress.grpcDialer(); d != nil {
+			opts = append(opts, otlpmetricgrpc.WithDialOption(grpc.WithContextDialer(d)))
+		}
+		exp, err = otlpmetricgrpc.New(ctx, opts...)
 	} else {
-		exp, err = otlpmetrichttp.New(ctx)
+		var opts []otlpmetrichttp.Option
+		if hc := egress.httpClient(getenv, "METRICS", log); hc != nil {
+			opts = append(opts, otlpmetrichttp.WithHTTPClient(hc))
+		}
+		exp, err = otlpmetrichttp.New(ctx, opts...)
 	}
 	if err != nil {
 		return nil, fmt.Errorf("otel: metric exporter: %w", err)
@@ -228,15 +247,23 @@ func setupMeter(ctx context.Context, getenv func(string) string, res *resource.R
 // is asynchronous and best-effort. The batch log record processor honors
 // OTEL_BLRP_* natively through its option defaults (same as the trace batch
 // processor and OTEL_BSP_*), so no manual wiring is needed here.
-func setupLogger(ctx context.Context, getenv func(string) string, res *resource.Resource) (*sdklog.LoggerProvider, error) {
+func setupLogger(ctx context.Context, getenv func(string) string, res *resource.Resource, egress *Egress, log *slog.Logger) (*sdklog.LoggerProvider, error) {
 	var (
 		exp sdklog.Exporter
 		err error
 	)
 	if protocolFor(getenv, "LOGS") == "grpc" {
-		exp, err = otlploggrpc.New(ctx)
+		var opts []otlploggrpc.Option
+		if d := egress.grpcDialer(); d != nil {
+			opts = append(opts, otlploggrpc.WithDialOption(grpc.WithContextDialer(d)))
+		}
+		exp, err = otlploggrpc.New(ctx, opts...)
 	} else {
-		exp, err = otlploghttp.New(ctx)
+		var opts []otlploghttp.Option
+		if hc := egress.httpClient(getenv, "LOGS", log); hc != nil {
+			opts = append(opts, otlploghttp.WithHTTPClient(hc))
+		}
+		exp, err = otlploghttp.New(ctx, opts...)
 	}
 	if err != nil {
 		return nil, fmt.Errorf("otel: log exporter: %w", err)

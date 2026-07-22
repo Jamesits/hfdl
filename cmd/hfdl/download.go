@@ -13,6 +13,7 @@ import (
 	"github.com/jamesits/hfdl/pkg/cache"
 	"github.com/jamesits/hfdl/pkg/config"
 	"github.com/jamesits/hfdl/pkg/hfapi"
+	"github.com/jamesits/hfdl/pkg/netcfg"
 )
 
 // destMode selects where downloaded blobs are materialized (cache.Installer
@@ -58,6 +59,8 @@ type downloadFlags struct {
 	stateDBFlag    string
 	logLevelStr    string
 	noTUI          bool
+	proxyStr       string
+	ipqosStr       string
 }
 
 func newDownloadCmd() *cobra.Command {
@@ -116,6 +119,10 @@ func newDownloadCmd() *cobra.Command {
 	fl.StringVar(&f.stateDBFlag, "hfdl-state-db", "", "state database path (default <cache>/.hfdl/state.db)")
 	fl.StringVar(&f.logLevelStr, "hfdl-log-level", "info", "log level: debug|info|warn|error")
 	fl.BoolVar(&f.noTUI, "hfdl-no-tui", false, "disable the interactive TUI")
+	fl.StringVar(&f.proxyStr, "hfdl-proxy", netcfg.SpecSystem,
+		"outbound proxy: direct|system|http://…|https://…|socks5://…|socks5h://…")
+	fl.StringVar(&f.ipqosStr, "hfdl-ipqos", netcfg.DefaultIPQoS,
+		"IP QoS for default[,download[,telemetry]] sockets (e.g. af21,cs1,none or 0x48,0x20)")
 	return cmd
 }
 
@@ -132,6 +139,8 @@ type downloadPlan struct {
 	quiet     bool
 	noTUI     bool
 	logLevel  slog.Level
+	proxy     netcfg.Proxy
+	qos       netcfg.IPQoS
 	single    bool // exactly one filename positional → final path is the file
 }
 
@@ -201,6 +210,17 @@ func buildPlan(f *downloadFlags, getenv func(string) string) (*downloadPlan, err
 		return nil, err
 	}
 
+	// Parsing is pure; the system-mode platform lookup happens later in
+	// wireTelemetry, where a ctx and logger exist.
+	proxy, err := netcfg.ParseProxy(f.proxyStr)
+	if err != nil {
+		return nil, fmt.Errorf("--hfdl-proxy: %w", err)
+	}
+	qos, err := netcfg.ParseIPQoS(f.ipqosStr)
+	if err != nil {
+		return nil, fmt.Errorf("--hfdl-ipqos: %w", err)
+	}
+
 	endpoints := config.Endpoints(f.endpointFlags, getenv)
 	if len(endpoints) == 0 {
 		return nil, fmt.Errorf("no endpoint resolved")
@@ -229,6 +249,8 @@ func buildPlan(f *downloadFlags, getenv func(string) string) (*downloadPlan, err
 		quiet:     f.quiet,
 		noTUI:     f.noTUI,
 		logLevel:  slog.Level(lvl),
+		proxy:     proxy,
+		qos:       qos,
 		single:    len(f.filenames) == 1,
 	}
 	p.cli = config.CLI{
@@ -250,6 +272,8 @@ func buildPlan(f *downloadFlags, getenv func(string) string) (*downloadPlan, err
 		StateDB:       config.StateDBPath(f.stateDBFlag, cacheDir),
 		LogLevel:      f.logLevelStr,
 		NoTUI:         f.noTUI,
+		Proxy:         proxy.String(),
+		IPQoS:         qos.String(),
 	}
 	return p, nil
 }
