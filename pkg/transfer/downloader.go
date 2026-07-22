@@ -203,7 +203,7 @@ func applyDefaults(t *FileTask) FileTask {
 		out.Conns = defaultConns
 	}
 	if out.BlockSize <= 0 {
-		out.BlockSize = adaptiveBlockSize(out.Size, out.Conns)
+		out.BlockSize = AdaptiveBlockSize(out.Size, out.Conns)
 	}
 	if out.StallWindow <= 0 {
 		out.StallWindow = defaultStallWindow
@@ -214,9 +214,11 @@ func applyDefaults(t *FileTask) FileTask {
 	return out
 }
 
-// adaptiveBlockSize is the FastCopy GenOvlSize analog: round the per-conn
-// share up to a power of two, clamped to [4MiB, 64MiB].
-func adaptiveBlockSize(size int64, conns int) int64 {
+// AdaptiveBlockSize is the FastCopy GenOvlSize analog: round the per-conn
+// share up to a power of two, clamped to [4MiB, 64MiB]. Exported as the single
+// source of truth so sched's re-chunking matches the downloader's block size
+// exactly (sched imports transfer; the reverse never happens).
+func AdaptiveBlockSize(size int64, conns int) int64 {
 	if conns < 1 {
 		conns = 1
 	}

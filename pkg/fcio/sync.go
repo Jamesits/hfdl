@@ -3,6 +3,8 @@ package fcio
 import (
 	"context"
 	"fmt"
+
+	"go.opentelemetry.io/otel/attribute"
 )
 
 // SyncFile fsyncs an already-complete file at path for durability. It exists for callers
@@ -12,6 +14,8 @@ func SyncFile(ctx context.Context, path string) error {
 	if err := ctx.Err(); err != nil {
 		return err
 	}
+	_, sp := startDetailSpan(ctx, "fcio.fsync", attribute.String("path", path))
+	defer endDetailSpan(sp)
 	f, err := openForSync(path)
 	if err != nil {
 		return fmt.Errorf("fcio: open %s: %w", path, err)

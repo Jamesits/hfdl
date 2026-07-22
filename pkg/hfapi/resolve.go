@@ -16,7 +16,7 @@ import (
 // survive; path keeps its separators with each segment escaped.
 func (c *Client) ResolveURL(rt RepoType, repo, rev, path string) string {
 	return fmt.Sprintf("%s/%s%s/resolve/%s/%s",
-		c.endpoint, rt.urlPrefix(), escPath(repo), url.PathEscape(rev), escPath(path))
+		c.endpoint, rt.URLPrefix(), escPath(repo), url.PathEscape(rev), escPath(path))
 }
 
 // ResolveXet issues a HEAD against the resolve URL and reports xet CAS
@@ -38,12 +38,15 @@ func (c *Client) ResolveXet(ctx context.Context, rt RepoType, repo, rev, path st
 	}
 	resp, err := c.hcNoFollow.Do(req)
 	if err != nil {
+		c.recordRequest(ctx, resultError)
 		return nil, fmt.Errorf("hfapi: HEAD %s: %w", u, err)
 	}
 	defer resp.Body.Close()
 	if resp.StatusCode >= 400 {
+		c.recordRequest(ctx, resultError)
 		return nil, statusError(resp, repo, rev)
 	}
+	c.recordRequest(ctx, resultOK)
 	data := &XetFileData{Hash: resp.Header.Get("X-Xet-Hash")}
 	if route := linkRel(resp.Header.Get("Link"), "xet-auth"); route != "" {
 		data.RefreshRoute = route

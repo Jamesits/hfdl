@@ -30,9 +30,11 @@ func (rt RepoType) plural() (string, error) {
 	return "", fmt.Errorf("hfapi: unknown repo type %q", string(rt))
 }
 
-// urlPrefix is the website URL prefix for resolve URLs: datasets and spaces
-// live under /datasets/ and /spaces/; models sit at the root.
-func (rt RepoType) urlPrefix() string {
+// URLPrefix is the website URL prefix for resolve URLs: datasets and spaces
+// live under /datasets/ and /spaces/; models sit at the root. Exported as the
+// single source of truth for the resolve-path prefix, shared by ResolveURL and
+// sched's per-upstream URL construction.
+func (rt RepoType) URLPrefix() string {
 	switch rt {
 	case RepoTypeDataset:
 		return "datasets/"

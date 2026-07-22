@@ -51,7 +51,7 @@ func offlineManagerAt(t *testing.T, hub *fixtureHub, dir, cacheRoot string) *Man
 	limits.Conns = 4
 	limits.MaxWorkers = 2
 	limits.BlockSize = 1 << 20
-	client := hfapi.NewClient(log, hub.srv.Client(), hub.srv.URL, "", 5*time.Second, 5*time.Second)
+	client := hfapi.NewClient(log, hub.srv.Client(), hub.srv.URL, "", 5*time.Second)
 	return NewManager(ManagerConfig{
 		Store:      st,
 		Clients:    map[string]*hfapi.Client{hub.srv.URL: client},

@@ -303,8 +303,9 @@ func TestShortBody(t *testing.T) {
 	}
 }
 
-// TestRedirectStripsAuthorization cross-host: transfer pins a CheckRedirect
-// on its client clone that drops Authorization when the host changes.
+// TestRedirectStripsAuthorization: transfer wraps config.NewAuthTransport on
+// its client clone (empty hubHost/token), which strips Authorization on every
+// hop, so a stray credential never survives to the redirect target.
 func TestRedirectStripsAuthorization(t *testing.T) {
 	content := newContent(7, 100000)
 	var gotAuth string

@@ -179,21 +179,16 @@ func newHTTPSource(log *slog.Logger, hc *http.Client, t *FileTask, headerTimeout
 	for _, u := range t.Upstreams {
 		s.ema[u.Endpoint] = u.EMABps
 	}
-	// Clone the injected client so the redirect policy can be pinned without
-	// mutating the caller's client: Authorization is stripped when a
-	// redirect crosses hosts (hfapi's hubAuthTransport pattern, replicated
-	// inline because transfer owns this client's usage). The transport is
-	// shared, so connection pooling is preserved.
+	// Clone the injected client so this source can layer its own RoundTripper
+	// without mutating the caller's client; the underlying transport is shared,
+	// so connection pooling is preserved. transfer authenticates payload GETs
+	// via presigned URLs, not a bearer token, so it carries none: the shared
+	// config.NewAuthTransport with an empty hubHost/token strips Authorization
+	// on every hop (defence in depth against a stray credential ever reaching a
+	// CDN) and stamps the hfdl User-Agent. Reusing hfapi's strip primitive keeps
+	// the security-sensitive decision in exactly one place.
 	c := *hc
-	c.CheckRedirect = func(req *http.Request, via []*http.Request) error {
-		if len(via) >= 10 {
-			return errors.New("transfer: too many redirects")
-		}
-		if len(via) > 0 && !strings.EqualFold(req.URL.Host, via[0].URL.Host) {
-			req.Header.Del("Authorization")
-		}
-		return nil
-	}
+	c.Transport = config.NewAuthTransport(hc.Transport, "", "", config.UserAgent())
 	s.hc = &c
 	return s
 }

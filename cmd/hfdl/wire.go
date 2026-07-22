@@ -185,15 +185,22 @@ func wireDownloadWith(ctx context.Context, p *downloadPlan, getenv func(string) 
 	// payload mirrors — CAS tokens always come from the primary Hub endpoint).
 	etagTimeout := config.ETagTimeout(getenv)
 	downloadTimeout := config.DownloadTimeout(getenv)
+	// hfdl.api.requests: one shared counter, each client labels it with its
+	// own endpoint. Noop when telemetry is disabled.
+	apiRequests, _ := prov.Counter(prov.Meter("hfdl.hfapi"), "hfdl.api.requests", "{request}")
 	clients := make(map[string]*hfapi.Client, len(p.endpoints))
 	for _, ep := range p.endpoints {
-		c := hfapi.NewClient(log, hc, ep, p.token, etagTimeout, downloadTimeout)
+		c := hfapi.NewClient(log, hc, ep, p.token, etagTimeout)
 		c.SetTracer(prov.Tracer("hfdl.hfapi"))
+		c.SetRequestCounter(apiRequests)
 		clients[ep] = c
 	}
 	primary := clients[p.endpoints[0]]
 
 	// 6. IO engine, buffer pool, volume exclusion set.
+	// HFDL_TRACE_FCIO_DETAIL gates the fine-grained fcio.read/fcio.fsync spans
+	// (process-global; noop unless telemetry is also enabled).
+	fcio.SetTraceDetail(config.TraceFCIODetail(getenv))
 	engine := fcio.NewEngine(log, st, ioTier(p.limits.IOMode))
 	poolCap := p.limits.IOBuffer
 	if poolCap == 0 {
@@ -217,6 +224,11 @@ func wireDownloadWith(ctx context.Context, p *downloadPlan, getenv func(string) 
 	// Hub requests before the rate limit engages — pace from the first call.
 	bandwidth := throttle.NewBucket(p.limits.MaxBandwidthBps, bwBurst, bwBurst)
 	api := throttle.NewBucket(p.limits.APIIOPS, p.limits.APIBurst, 1)
+	// hfdl.throttle.wait_seconds: one shared counter, each bucket labels it
+	// with its own name. Noop when telemetry is disabled.
+	waitSeconds, _ := prov.FloatCounter(prov.Meter("hfdl.throttle"), "hfdl.throttle.wait_seconds", "s")
+	bandwidth.SetWaitCounter(waitSeconds, "bandwidth")
+	api.SetWaitCounter(waitSeconds, "api")
 	duty := throttle.NewDutyLimiter(p.limits.DiskActivePct, throttle.MediaUnknown)
 	// Probe the cache filesystem once: the duty derate depends on media class.
 	if fsType, err := fcio.ProbeFs(ctx, p.cacheDir); err != nil {

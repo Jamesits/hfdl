@@ -12,8 +12,6 @@ const (
 	// Blocks flush in slab-sized pieces, so RAM per connection is bounded
 	// regardless of the scheduling block size.
 	DefaultSlabSize int64 = 8 << 20
-	// DefaultPoolCap is used when the caller passes a non-positive cap.
-	DefaultPoolCap int64 = 64 << 20
 	// slabAlign is the alignment every slab base satisfies. mmap arenas are
 	// page-aligned by construction and slab sizes are rounded up to a
 	// multiple of it, so slab pointer % slabAlign == 0 always holds on

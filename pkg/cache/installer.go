@@ -366,12 +366,24 @@ func (in *Installer) copyFile(ctx context.Context, src, dst string, size int64, 
 	defer df.Close()
 	var calc throttle.DutyCalc
 	err = in.e.ReadAll(ctx, sf, func(p []byte, off int64) error {
-		if err := df.WriteUnaligned(p, off); err != nil {
-			return err
-		}
-		if in.d != nil {
-			if err := in.d.Checkpoint(ctx, &calc); err != nil {
+		// Under heavier duty limiting write each delivered chunk in smaller
+		// pieces (FastCopy TransSize) so a checkpoint lands between them; a
+		// single whole-p write when unlimited (WriteChunkSize returns len(p)).
+		for i := 0; i < len(p); {
+			w := len(p) - i
+			if in.d != nil {
+				if cs := int(in.d.WriteChunkSize(int64(len(p)))); cs < w {
+					w = cs
+				}
+			}
+			if err := df.WriteUnaligned(p[i:i+w], off+int64(i)); err != nil {
 				return err
+			}
+			i += w
+			if in.d != nil {
+				if err := in.d.Checkpoint(ctx, &calc); err != nil {
+					return err
+				}
 			}
 		}
 		return nil

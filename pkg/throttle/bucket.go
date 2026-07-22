@@ -5,6 +5,9 @@ import (
 	"sync"
 	"sync/atomic"
 	"time"
+
+	"go.opentelemetry.io/otel/attribute"
+	"go.opentelemetry.io/otel/metric"
 )
 
 // BucketStats is a point-in-time snapshot of a Bucket.
@@ -42,6 +45,12 @@ type Bucket struct {
 
 	waiters   atomic.Int64
 	waitTotal atomic.Int64 // nanoseconds
+
+	// waitCounter (hfdl.throttle.wait_seconds) is incremented with each
+	// caller's blocked duration; waitAttrs is the precomputed {bucket} label.
+	// nil counter = no metric. Set once before concurrent use.
+	waitCounter metric.Float64Counter
+	waitAttrs   metric.MeasurementOption
 }
 
 // NewBucket returns a Bucket limited to perSec tokens per second with the
@@ -75,6 +84,15 @@ func NewBucket(perSec, burst, start int64) *Bucket {
 	return b
 }
 
+// SetWaitCounter installs the hfdl.throttle.wait_seconds counter, incremented
+// with each caller's blocked duration under the given bucket label
+// (api|bandwidth). nil (the default) disables the metric. Call once before
+// concurrent use.
+func (b *Bucket) SetWaitCounter(c metric.Float64Counter, bucket string) {
+	b.waitCounter = c
+	b.waitAttrs = metric.WithAttributes(attribute.String("bucket", bucket))
+}
+
 // Wait blocks until n tokens are available and consumes them, or until ctx
 // is done (returning ctx.Err()). n <= 0 never blocks.
 func (b *Bucket) Wait(ctx context.Context, n int64) error {
@@ -86,7 +104,13 @@ func (b *Bucket) Wait(ctx context.Context, n int64) error {
 	defer func() {
 		if blocked {
 			b.waiters.Add(-1)
-			b.waitTotal.Add(int64(b.clock.Now().Sub(blockedFrom)))
+			d := b.clock.Now().Sub(blockedFrom)
+			b.waitTotal.Add(int64(d))
+			if b.waitCounter != nil {
+				// Record even on a cancelled Wait: the caller really did block
+				// for d, so the cumulative wait must reflect it.
+				b.waitCounter.Add(ctx, d.Seconds(), b.waitAttrs)
+			}
 		}
 	}()
 

@@ -286,13 +286,27 @@ func (m *Manager) copyFile(ctx context.Context, calc *throttle.DutyCalc, src, ds
 	}
 	defer dstF.Close()
 
+	d := m.cfg.Duty
 	var written int64
 	err = m.cfg.Engine.ReadAll(ctx, srcF, func(p []byte, off int64) error {
-		if err := dstF.WriteUnaligned(p, off); err != nil {
-			return err
+		// Under heavier duty limiting write each delivered chunk in smaller
+		// pieces (FastCopy TransSize) so a checkpoint lands between them; a
+		// single whole-p write when unlimited (WriteChunkSize returns len(p)).
+		for i := 0; i < len(p); {
+			w := len(p) - i
+			if cs := int(d.WriteChunkSize(int64(len(p)))); cs < w {
+				w = cs
+			}
+			if err := dstF.WriteUnaligned(p[i:i+w], off+int64(i)); err != nil {
+				return err
+			}
+			i += w
+			if err := d.Checkpoint(ctx, calc); err != nil {
+				return err
+			}
 		}
 		written += int64(len(p))
-		return m.cfg.Duty.Checkpoint(ctx, calc)
+		return nil
 	})
 	if err != nil {
 		return written, err

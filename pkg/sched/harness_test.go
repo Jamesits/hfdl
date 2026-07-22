@@ -486,7 +486,7 @@ func newTestEnvLog(t *testing.T, hub *fixtureHub, log *slog.Logger, opts ...envO
 		o(e)
 	}
 
-	client := hfapi.NewClient(log, hub.srv.Client(), hub.srv.URL, "", 5*time.Second, 5*time.Second)
+	client := hfapi.NewClient(log, hub.srv.Client(), hub.srv.URL, "", 5*time.Second)
 	m := NewManager(ManagerConfig{
 		Store:      st,
 		Clients:    map[string]*hfapi.Client{hub.srv.URL: client},
@@ -516,7 +516,7 @@ func (e *testEnv) rebuild(t *testing.T) *Manager {
 	if os.Getenv("HFDL_TEST_DEBUG") != "" {
 		log = slog.New(slog.NewTextHandler(testLogWriter{t}, &slog.HandlerOptions{Level: slog.LevelDebug}))
 	}
-	client := hfapi.NewClient(log, e.hub.srv.Client(), e.hub.srv.URL, "", 5*time.Second, 5*time.Second)
+	client := hfapi.NewClient(log, e.hub.srv.Client(), e.hub.srv.URL, "", 5*time.Second)
 	engine := fcio.NewEngine(log, e.st, fcio.TierAuto)
 	pool := fcio.NewPool(0, 64<<20)
 	volumes := fcio.NewVolumeSet()

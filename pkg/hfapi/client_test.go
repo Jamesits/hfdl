@@ -24,7 +24,7 @@ func writeBody(t *testing.T, w http.ResponseWriter, s string) {
 
 func newTestClient(t *testing.T, endpoint, token string, etagTimeout time.Duration) *Client {
 	t.Helper()
-	return NewClient(slog.New(slog.DiscardHandler), &http.Client{}, endpoint, token, etagTimeout, 42*time.Second)
+	return NewClient(slog.New(slog.DiscardHandler), &http.Client{}, endpoint, token, etagTimeout)
 }
 
 // getJSON runs Tree against srv and returns the error (Tree is the simplest
@@ -241,15 +241,5 @@ func TestSetTracerNilSafe(t *testing.T) {
 	c.SetTracer(nil)
 	if _, err := c.RepoInfo(t.Context(), RepoTypeModel, "o/r"); err != nil {
 		t.Fatal(err)
-	}
-}
-
-func TestEndpointAndDownloadTimeout(t *testing.T) {
-	c := NewClient(slog.New(slog.DiscardHandler), &http.Client{}, "https://hf.example.co/", "tok", time.Second, 42*time.Second)
-	if c.Endpoint() != "https://hf.example.co" {
-		t.Errorf("Endpoint() = %q", c.Endpoint())
-	}
-	if c.DownloadTimeout() != 42*time.Second {
-		t.Errorf("DownloadTimeout() = %v", c.DownloadTimeout())
 	}
 }

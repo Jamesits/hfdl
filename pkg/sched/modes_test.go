@@ -29,7 +29,7 @@ func TestDryRun(t *testing.T) {
 
 	// Rebuild the manager with DryRun.
 	log := slog.New(slog.DiscardHandler)
-	client := hfapi.NewClient(log, hub.srv.Client(), hub.srv.URL, "", 5*time.Second, 5*time.Second)
+	client := hfapi.NewClient(log, hub.srv.Client(), hub.srv.URL, "", 5*time.Second)
 	engine := fcio.NewEngine(log, env.st, fcio.TierAuto)
 	pool := fcio.NewPool(0, 64<<20)
 	volumes := fcio.NewVolumeSet()
@@ -163,7 +163,7 @@ func TestOfflineReapUncachedFile(t *testing.T) {
 
 	// Dry-run first: lists the repo without downloading.
 	log := slog.New(slog.DiscardHandler)
-	client := hfapi.NewClient(log, hub.srv.Client(), hub.srv.URL, "", 5*time.Second, 5*time.Second)
+	client := hfapi.NewClient(log, hub.srv.Client(), hub.srv.URL, "", 5*time.Second)
 	engine := fcio.NewEngine(log, env.st, fcio.TierAuto)
 	pool := fcio.NewPool(0, 64<<20)
 	volumes := fcio.NewVolumeSet()

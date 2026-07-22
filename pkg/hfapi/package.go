@@ -7,15 +7,17 @@
 // per repo so a moving branch cannot mix file versions mid-run.
 //
 // Auth: the bearer token is attached to Hub-host requests only and stripped
-// on cross-host (CDN/object-storage) redirects. This is implemented as a
-// RoundTripper wrapping the caller-supplied http.Client's transport, so
-// every redirect hop re-enters RoundTrip and re-evaluates the destination
-// host (net/http's own header forwarding on redirects is not trusted).
+// on cross-host (CDN/object-storage) redirects. This is the shared
+// config.NewAuthTransport RoundTripper wrapping the caller-supplied
+// http.Client's transport, so every redirect hop re-enters RoundTrip and
+// re-evaluates the destination host (net/http's own header forwarding on
+// redirects is not trusted). transfer wraps the same primitive for its payload
+// downloads, so the security-sensitive strip decision lives in one place.
 //
 // Timeouts are RESPONSE timeouts (context deadlines around the whole
 // metadata exchange), not connect timeouts: etagTimeout bounds metadata
-// HEAD/listing calls, downloadTimeout is only exposed via DownloadTimeout()
-// for the transfer package's download GETs.
+// HEAD/listing calls (the download response timeout lives on the transfer
+// package, sourced from config.DownloadTimeout).
 //
 // Tracing is optional: SetTracer installs a tracer that wraps each public
 // API method in a span named "hfapi.<Op>"; nil (the default) is a no-op.

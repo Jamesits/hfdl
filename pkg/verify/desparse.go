@@ -75,7 +75,14 @@ func (c *Checker) deSparse(ctx context.Context, f *fcio.File, size int64) (strin
 	var holeBytes int64
 	fill := func(start, end int64) error {
 		for off := start; off < end; {
-			n := min(slab, end-off)
+			// Shrink the write chunk under heavier duty limiting (FastCopy
+			// TransSize) so a checkpoint lands more often; full slab when
+			// unlimited (WriteChunkSize returns the passed size).
+			chunk := slab
+			if c.d != nil {
+				chunk = min(chunk, c.d.WriteChunkSize(slab))
+			}
+			n := min(chunk, end-off)
 			// Fresh read-only zero view per chunk — no SetLen on a shared buf,
 			// so concurrent de-sparse walks never race on one fill length.
 			zero := c.p.ZeroSlice(int(n))

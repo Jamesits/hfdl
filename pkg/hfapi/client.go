@@ -12,33 +12,33 @@ import (
 	"time"
 
 	"github.com/jamesits/hfdl/pkg/config"
+	"go.opentelemetry.io/otel/attribute"
+	"go.opentelemetry.io/otel/metric"
 	"go.opentelemetry.io/otel/trace"
 )
 
 // Client talks to one Hub endpoint. Construct with NewClient; it is safe
-// for concurrent use once SetTracer (if used) has been called.
+// for concurrent use once SetTracer/SetRequestCounter (if used) have been
+// called.
 type Client struct {
 	log *slog.Logger
 	hc  *http.Client // follows redirects; transport attaches auth per hop
 	// hcNoFollow serves HEAD resolve calls: the Hub puts X-Xet-* metadata on
 	// its own (possibly 302) response, which following the redirect would lose.
-	hcNoFollow      *http.Client
-	endpoint        string
-	hubHost         string
-	token           string
-	etagTimeout     time.Duration
-	downloadTimeout time.Duration
-	tracer          trace.Tracer // nil = no spans; set before concurrent use
+	hcNoFollow  *http.Client
+	endpoint    string
+	etagTimeout time.Duration
+	tracer      trace.Tracer        // nil = no spans; set before concurrent use
+	reqCounter  metric.Int64Counter // nil = no request metric; set before concurrent use
 }
 
 // NewClient wraps hc so that the bearer token and User-Agent are attached by
-// a RoundTripper (hubAuthTransport) on every request — including redirect
-// hops — with the token sent to the endpoint's host only. hc is shallow-copied;
-// the caller's client is left untouched. etagTimeout is the response-header
-// deadline for metadata calls issued by this client (the body then streams
-// under the caller, unbounded by it); downloadTimeout is only reported by
-// DownloadTimeout for the transfer package.
-func NewClient(log *slog.Logger, hc *http.Client, endpoint, token string, etagTimeout, downloadTimeout time.Duration) *Client {
+// the shared config.NewAuthTransport RoundTripper on every request —
+// including redirect hops — with the token sent to the endpoint's host only.
+// hc is shallow-copied; the caller's client is left untouched. etagTimeout is
+// the response-header deadline for metadata calls issued by this client (the
+// body then streams under the caller, unbounded by it).
+func NewClient(log *slog.Logger, hc *http.Client, endpoint, token string, etagTimeout time.Duration) *Client {
 	if log == nil {
 		log = slog.New(slog.DiscardHandler)
 	}
@@ -48,29 +48,17 @@ func NewClient(log *slog.Logger, hc *http.Client, endpoint, token string, etagTi
 		hubHost = u.Host
 	}
 	inner := *hc
-	base := hc.Transport
-	if base == nil {
-		base = http.DefaultTransport
-	}
-	inner.Transport = &hubAuthTransport{
-		base:    base,
-		hubHost: hubHost,
-		token:   token,
-		ua:      config.UserAgent(),
-	}
+	inner.Transport = config.NewAuthTransport(hc.Transport, hubHost, token, config.UserAgent())
 	noFollow := inner
 	noFollow.CheckRedirect = func(_ *http.Request, _ []*http.Request) error {
 		return http.ErrUseLastResponse
 	}
 	return &Client{
-		log:             log,
-		hc:              &inner,
-		hcNoFollow:      &noFollow,
-		endpoint:        endpoint,
-		hubHost:         hubHost,
-		token:           token,
-		etagTimeout:     etagTimeout,
-		downloadTimeout: downloadTimeout,
+		log:         log,
+		hc:          &inner,
+		hcNoFollow:  &noFollow,
+		endpoint:    endpoint,
+		etagTimeout: etagTimeout,
 	}
 }
 
@@ -79,39 +67,10 @@ func NewClient(log *slog.Logger, hc *http.Client, endpoint, token string, etagTi
 // use.
 func (c *Client) SetTracer(t trace.Tracer) { c.tracer = t }
 
-// Endpoint returns the Hub endpoint this client talks to.
-func (c *Client) Endpoint() string { return c.endpoint }
-
-// DownloadTimeout is the response timeout transfer should apply to download
-// GETs. hfapi itself never issues download GETs.
-func (c *Client) DownloadTimeout() time.Duration { return c.downloadTimeout }
-
-// hubAuthTransport attaches Authorization (when a token is configured and
-// the destination is the Hub host) and the hfdl User-Agent on every request.
-// Because redirects re-enter RoundTrip for each hop, the header is naturally
-// re-evaluated per hop: kept on the Hub host, stripped anywhere else
-// (CDN/object storage). This intentionally does not rely on net/http's
-// redirect header-forwarding rules.
-type hubAuthTransport struct {
-	base    http.RoundTripper
-	hubHost string
-	token   string
-	ua      string
-}
-
-func (t *hubAuthTransport) RoundTrip(req *http.Request) (*http.Response, error) {
-	r := req.Clone(req.Context())
-	r.Header = req.Header.Clone()
-	if r.Header.Get("User-Agent") == "" {
-		r.Header.Set("User-Agent", t.ua)
-	}
-	if t.token != "" && strings.EqualFold(r.URL.Host, t.hubHost) {
-		r.Header.Set("Authorization", "Bearer "+t.token)
-	} else {
-		r.Header.Del("Authorization")
-	}
-	return t.base.RoundTrip(r)
-}
+// SetRequestCounter installs the hfdl.api.requests counter, incremented once
+// per HTTP request this client issues and labeled {endpoint,result}. nil (the
+// default) disables the metric. Call before concurrent use.
+func (c *Client) SetRequestCounter(counter metric.Int64Counter) { c.reqCounter = counter }
 
 // startSpan begins a "hfapi.<op>" span when a tracer is installed; the
 // returned span is nil (and EndSpan a no-op) otherwise.
@@ -126,6 +85,25 @@ func endSpan(sp trace.Span) {
 	if sp != nil {
 		sp.End()
 	}
+}
+
+// Bounded result labels for hfdl.api.requests (never per-file/high-cardinality).
+const (
+	resultOK    = "ok"
+	resultError = "error"
+)
+
+// recordRequest increments hfdl.api.requests for one issued request. The
+// endpoint attribute is this client's Hub endpoint — a coarse, code-controlled
+// value, never a repo/path — and result is the bounded ok/error label.
+func (c *Client) recordRequest(ctx context.Context, result string) {
+	if c.reqCounter == nil {
+		return
+	}
+	c.reqCounter.Add(ctx, 1, metric.WithAttributes(
+		attribute.String("endpoint", c.endpoint),
+		attribute.String("result", result),
+	))
 }
 
 // withEtagTimeout bounds the HEAD resolve call (ResolveXet) by the etag
@@ -170,14 +148,17 @@ func (c *Client) do(ctx context.Context, method, reqURL string, body []byte, rep
 	resp, err := c.hc.Do(req)
 	disarm()
 	if err != nil {
+		c.recordRequest(ctx, resultError)
 		cancel(nil) // no-op if the deadline already cancelled with a cause
 		return nil, fmt.Errorf("hfapi: %s %s: %w", method, reqURL, err)
 	}
 	if resp.StatusCode >= 200 && resp.StatusCode < 300 {
+		c.recordRequest(ctx, resultOK)
 		// Body streams under the caller; its Close releases the request ctx.
 		resp.Body = &cancelBody{ReadCloser: resp.Body, cancel: cancel}
 		return resp, nil
 	}
+	c.recordRequest(ctx, resultError)
 	// statusError may read the error body, so it runs (in the return
 	// expression) before these deferred closes: body first, then cancel.
 	defer cancel(nil)

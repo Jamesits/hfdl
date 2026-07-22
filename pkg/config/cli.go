@@ -96,6 +96,14 @@ func Offline(getenv func(string) string) bool {
 	return truthy(getenv("HF_HUB_OFFLINE"))
 }
 
+// TraceFCIODetail reports HFDL_TRACE_FCIO_DETAIL truthiness: the opt-in gate
+// for fine-grained fcio.read/fcio.fsync spans. Off by default because those
+// spans are per-file-pass diagnostic detail whose volume is unwanted in
+// normal runs; they only emit when telemetry is also enabled.
+func TraceFCIODetail(getenv func(string) string) bool {
+	return truthy(getenv("HFDL_TRACE_FCIO_DETAIL"))
+}
+
 func truthy(v string) bool {
 	switch strings.ToLower(strings.TrimSpace(v)) {
 	case "1", "true", "yes", "on":

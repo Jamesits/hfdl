@@ -9,7 +9,7 @@ import (
 )
 
 func TestResolveURL(t *testing.T) {
-	c := NewClient(slog.New(slog.DiscardHandler), &http.Client{}, "https://hf.example.co", "", 0, 0)
+	c := NewClient(slog.New(slog.DiscardHandler), &http.Client{}, "https://hf.example.co", "", 0)
 	cases := []struct {
 		rt              RepoType
 		repo, rev, path string

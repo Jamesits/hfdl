@@ -244,7 +244,7 @@ func (m *Manager) startDownload(ctx context.Context, f *store.File) (launched bo
 
 	blockSize := limits.BlockSize
 	if blockSize <= 0 {
-		blockSize = adaptiveBlockSize(f.Size, limits.Conns)
+		blockSize = transfer.AdaptiveBlockSize(f.Size, limits.Conns)
 	}
 	bounds := missing
 	if src != nil {
@@ -524,37 +524,11 @@ func (m *Manager) transferUpstreams(ctx context.Context) ([]*transfer.Upstream, 
 }
 
 // resolveRepoPath prefixes dataset/space repos for resolve URLs, matching
-// hfapi.ResolveURL's website layout (transfer builds the URL itself).
+// hfapi.ResolveURL's website layout (transfer builds the URL itself). The
+// prefix mapping is hfapi.RepoType.URLPrefix so the security-neutral but
+// drift-prone dataset/space layout lives in exactly one place.
 func resolveRepoPath(repo *store.Repo) string {
-	switch hfapi.RepoType(repo.Type) {
-	case hfapi.RepoTypeDataset:
-		return "datasets/" + repo.Name
-	case hfapi.RepoTypeSpace:
-		return "spaces/" + repo.Name
-	default:
-		return repo.Name
-	}
-}
-
-// adaptiveBlockSize mirrors transfer's GenOvlSize analog so sched's
-// re-chunking matches the downloader's block size exactly.
-func adaptiveBlockSize(size int64, conns int) int64 {
-	const (
-		minBlock = 4 << 20
-		maxBlock = 64 << 20
-	)
-	if conns < 1 {
-		conns = 1
-	}
-	v := size / int64(conns)
-	if v < minBlock {
-		return minBlock
-	}
-	p := int64(minBlock)
-	for p < v && p < maxBlock {
-		p <<= 1
-	}
-	return min(p, maxBlock)
+	return hfapi.RepoType(repo.Type).URLPrefix() + repo.Name
 }
 
 // chunkBlocks splits the missing ranges at blockSize into pending block
