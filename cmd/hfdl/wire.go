@@ -43,7 +43,8 @@ const (
 	// fcioPoolSlab is the fcio buffer pool slab size: 8MiB, FastCopy
 	// mainBuf-style.
 	fcioPoolSlab = 8 << 20
-	// fcioPoolMinCap/MaxCap clamp the --io-buffer auto pool: 64MiB..1GiB.
+	// fcioPoolMinCap/MaxCap clamp the --io-buffer auto pool: 64MiB..1GiB. The
+	// upper bound is further capped at half of physical RAM (see autoIOBuffer).
 	fcioPoolMinCap = 64 << 20
 	fcioPoolMaxCap = 1 << 30
 	// progressInterval is the non-TTY slog progress cadence.
@@ -256,7 +257,15 @@ func (app *wireApp) wireComponents(ctx context.Context, p *downloadPlan, getenv 
 	engine := fcio.NewEngine(log, st, ioTier(p.limits.IOMode))
 	poolCap := p.limits.IOBuffer
 	if poolCap == 0 {
-		poolCap = clamp(fcioPoolSlab*int64(p.limits.Conns)*2, fcioPoolMinCap, fcioPoolMaxCap)
+		// The physical-RAM probe is best-effort: on failure autoIOBuffer keeps
+		// its fixed ceiling. An explicit --hfdl-io-buffer bypasses both.
+		totalRAM, ramErr := fcio.TotalRAM()
+		if ramErr != nil {
+			log.LogAttrs(ctx, slog.LevelDebug,
+				"physical RAM probe failed; auto io-buffer keeps its fixed ceiling",
+				slog.Any("err", ramErr))
+		}
+		poolCap = autoIOBuffer(p.limits.Conns, totalRAM)
 	}
 	// Pass the process logger so an mmap→heap arena fallback is visible in
 	// production logs, not just under tests.
@@ -568,6 +577,22 @@ func mediaClass(t fcio.FsType) throttle.MediaClass {
 		return throttle.MediaNetFS
 	}
 	return throttle.MediaUnknown
+}
+
+// autoIOBuffer sizes the fcio buffer pool when --hfdl-io-buffer is unset. It
+// scales with the connection count (each connection keeps a couple of slabs
+// in flight) but is clamped to [64MiB, 1GiB] so it neither starves nor
+// dominates, then further capped at half of physical RAM: on small hosts a
+// 1GiB pool would evict the page cache or risk OOM. totalRAM <= 0 means the
+// probe failed — the fixed clamp stands. The half-RAM cap can legitimately
+// fall below fcioPoolMinCap on a tiny host; NewPool floors the result to one
+// slab, so the pool stays usable.
+func autoIOBuffer(conns int, totalRAM int64) int64 {
+	poolCap := clamp(fcioPoolSlab*int64(conns)*2, fcioPoolMinCap, fcioPoolMaxCap)
+	if half := totalRAM / 2; totalRAM > 0 && half < poolCap {
+		poolCap = half
+	}
+	return poolCap
 }
 
 func clamp(v, lo, hi int64) int64 {

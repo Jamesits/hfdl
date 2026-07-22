@@ -93,7 +93,7 @@ type Limits struct {
 	BlockSize          int64         // 0 = adaptive: clamp(pow2(size/conns), 4MiB, 64MiB)
 	StallTimeout       time.Duration // idle-read / soft floor window
 	StallMinBytes      int64         // soft throughput floor per window
-	IOBuffer           int64         // fcio pool cap bytes; 0 = auto clamp(slab×conns×2, 64MiB, 1GiB)
+	IOBuffer           int64         // fcio pool cap bytes; 0 = auto clamp(slab×conns×2, 64MiB, 1GiB) capped at ½ RAM
 	CheckpointInterval time.Duration // durable progress cadence
 	IOMode             IOMode
 	UpstreamPolicy     UpstreamPolicy

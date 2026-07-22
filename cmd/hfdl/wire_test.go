@@ -344,6 +344,39 @@ func TestMetricsSourceCollectNilSafe(t *testing.T) {
 	_ = (&metricsSource{app: &wireApp{}}).Collect()
 }
 
+func TestAutoIOBuffer(t *testing.T) {
+	const (
+		minCap = int64(fcioPoolMinCap) // 64MiB
+		maxCap = int64(fcioPoolMaxCap) // 1GiB
+		slab   = int64(fcioPoolSlab)   // 8MiB
+	)
+	tests := []struct {
+		name     string
+		conns    int
+		totalRAM int64
+		want     int64
+	}{
+		// RAM unknown (probe failed): fixed clamp stands.
+		{"probe-failed-low-conns", 1, 0, minCap},       // 16MiB → floored to 64MiB
+		{"probe-failed-mid-conns", 8, 0, slab * 8 * 2}, // 128MiB, inside band
+		{"probe-failed-high-conns", 128, 0, maxCap},    // clamped to 1GiB
+		// Plenty of RAM: half exceeds the fixed ceiling, so no extra cap.
+		{"ample-ram", 128, 64 << 30, maxCap},       // half=32GiB > 1GiB
+		{"ram-exactly-2gib", 128, 2 << 30, maxCap}, // half=1GiB == cap, no cut
+		// Small hosts: half RAM bites below the fixed ceiling.
+		{"ram-1gib-caps-below-max", 128, 1 << 30, 512 << 20}, // half=512MiB < 1GiB base
+		{"ram-below-min-cap", 8, 100 << 20, 50 << 20},        // half=50MiB, below the 64MiB min
+		{"ram-tiny-below-slab", 8, 24 << 20, 12 << 20},       // half=12MiB; NewPool floors to a slab later
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := autoIOBuffer(tc.conns, tc.totalRAM); got != tc.want {
+				t.Fatalf("autoIOBuffer(%d, %d) = %d, want %d", tc.conns, tc.totalRAM, got, tc.want)
+			}
+		})
+	}
+}
+
 func TestHelpers(t *testing.T) {
 	if clamp(5, 10, 20) != 10 || clamp(25, 10, 20) != 20 || clamp(15, 10, 20) != 15 {
 		t.Fatal("clamp broken")

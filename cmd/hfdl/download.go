@@ -114,7 +114,7 @@ func newDownloadCmd() *cobra.Command {
 	fl.DurationVar(&f.stallTimeout, "hfdl-stall-timeout", dfl.StallTimeout, "idle-read stall window")
 	fl.StringVar(&f.stallMinStr, "hfdl-stall-min-bytes", "32KiB", "minimum bytes per stall window before a connection is killed")
 	fl.StringVar(&f.ioModeStr, "hfdl-io-mode", config.IOBuffered.String(), "storage IO mode: buffered|direct|sequential")
-	fl.StringVar(&f.ioBufferStr, "hfdl-io-buffer", "", "RAM write-cache pool cap (default auto: clamp(slab*connections*2, 64MiB, 1GiB))")
+	fl.StringVar(&f.ioBufferStr, "hfdl-io-buffer", "", "RAM write-cache pool cap (default auto: clamp(slab*connections*2, 64MiB, 1GiB), capped at half of system RAM)")
 	fl.DurationVar(&f.checkpointIntv, "hfdl-checkpoint-interval", dfl.CheckpointInterval, "durable progress cadence (flush/fsync/persist)")
 	fl.StringVar(&f.stateDBFlag, "hfdl-state-db", "", "state database path (default <cache>/.hfdl/state.db)")
 	fl.StringVar(&f.logLevelStr, "hfdl-log-level", "info", "log level: debug|info|warn|error")
