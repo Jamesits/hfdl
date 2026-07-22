@@ -23,7 +23,7 @@ func acquireLock(path string) (*os.File, error) {
 		0, 1, 0, ol,
 	)
 	if err != nil {
-		f.Close()
+		_ = f.Close()
 		return nil, fmt.Errorf("%w (lock file %s)", ErrLocked, path)
 	}
 	return f, nil
