@@ -45,7 +45,7 @@ func (fd *fileDownload) worker(ws *workerState) {
 			return
 		}
 		leaseStart := time.Now()
-		b, ok, err := fd.task.Leaser.Lease(ws.ctx, fd.task.FileID)
+		b, ok, err := fd.leaseBlock(ws.ctx)
 		if err != nil {
 			if ws.ctx.Err() != nil {
 				return // drain / shutdown / fallback
@@ -66,7 +66,6 @@ func (fd *fileDownload) worker(ws *workerState) {
 			}
 			continue
 		}
-		fd.seqBaseline(b.Offset)
 		fd.inflight.Add(1)
 		fd.executeBlock(ws, b, time.Since(leaseStart))
 		fd.inflight.Add(-1)
@@ -588,9 +587,29 @@ func (fd *fileDownload) seqWait(off int64) error {
 	}
 }
 
+// leaseBlock leases the next block for this file. Sequential mode holds
+// leaseMu across Lease and the baseline registration: the leaser hands
+// blocks out in offset order, but without the lock a worker holding a
+// later block can win the race between its Lease returning and
+// seqBaseline running, pinning the watermark above the schedule's true
+// minimum and letting the earlier block's flushes bypass the commit gate.
+func (fd *fileDownload) leaseBlock(ctx context.Context) (Block, bool, error) {
+	if !fd.task.Sequential {
+		return fd.task.Leaser.Lease(ctx, fd.task.FileID)
+	}
+	fd.leaseMu.Lock()
+	defer fd.leaseMu.Unlock()
+	b, ok, err := fd.task.Leaser.Lease(ctx, fd.task.FileID)
+	if err == nil && ok {
+		fd.seqBaseline(b.Offset)
+	}
+	return b, ok, err
+}
+
 // seqBaseline pins the Tier C watermark to the first leased block's
 // offset. The leaser hands blocks out in offset order (documented
-// assumption), so the first lease is the schedule's minimum.
+// assumption), so the first lease is the schedule's minimum; leaseBlock
+// serializes Lease with this registration so "first" is well-defined.
 func (fd *fileDownload) seqBaseline(off int64) {
 	if !fd.task.Sequential {
 		return

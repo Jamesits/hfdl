@@ -276,6 +276,10 @@ type fileDownload struct {
 
 	// Tier C in-order commit watermark (Sequential only): every byte below
 	// seqCommit is flushed, and flushes happen strictly at the watermark.
+	// leaseMu serializes Lease with baseline registration (see leaseBlock);
+	// it is separate from seqMu because seqWait parks on seqCond while
+	// holding seqMu, and a lease must never wait behind a parked committer.
+	leaseMu    sync.Mutex
 	seqMu      sync.Mutex
 	seqCond    *sync.Cond
 	seqStarted bool
