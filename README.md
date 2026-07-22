@@ -43,6 +43,8 @@ Differences to `hf download`:
 
 ### Environment Variables
 
+<details>
+<summary>Click to expand</summary>
 [`hf` documentation](https://huggingface.co/docs/huggingface_hub/en/package_reference/environment_variables)
 
 Generic:
@@ -60,7 +62,7 @@ XET:
 
 - [x] `HF_HUB_DISABLE_XET`
 - [x] `HF_XET_CACHE`
-- [ ] `HF_XET_HIGH_PERFORMANCE`
+- [ ] `HF_XET_HIGH_PERFORMANCE` (high-performance by default)
 - [ ] `HF_XET_RECONSTRUCT_WRITE_SEQUENTIALLY`
 - [x] `HF_XET_CHUNK_CACHE_SIZE_BYTES`
 - [ ] `HF_XET_SHARD_CACHE_SIZE_LIMIT`
@@ -74,15 +76,17 @@ Boolean values:
 - [ ] `HF_HUB_DISABLE_PROGRESS_BARS`
 - [ ] `HF_HUB_DISABLE_SYMLINKS`
 - [ ] `HF_HUB_DISABLE_SYMLINKS_WARNING`
-- [ ] `HF_HUB_DISABLE_EXPERIMENTAL_WARNING`
-- [ ] `HF_HUB_DISABLE_TELEMETRY`
-- [ ] `HF_HUB_DISABLE_UPDATE_CHECK`
+- [ ] `HF_HUB_DISABLE_EXPERIMENTAL_WARNING` (not relevant)
+- [x] `HF_HUB_DISABLE_TELEMETRY` (no telemetry)
+- [x] `HF_HUB_DISABLE_UPDATE_CHECK` (no update check)
 
 From external tools:
 
-- [ ] `DO_NOT_TRACK`
+- [x] `DO_NOT_TRACK` (no tracking)
 - [ ] `NO_COLOR`
 - [x] `XDG_CACHE_HOME`
+
+</details>
 
 ## Performance Tuning
 
