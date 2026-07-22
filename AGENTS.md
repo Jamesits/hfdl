@@ -9,7 +9,7 @@ High-speed Hugging Face downloader.
 - Use uptrace/bun for ORM
 
 ## Code Style
-- Use comments only to document design intentions, common pits and falls, incompatiblities and cross-platform behaviour differences; package-level comments should go into a separate `package.go` file
+- Use comments only to document design intentions, common pits and falls, tradeoffs, incompatiblities and cross-platform behaviour differences; package-level comments should go into a separate `package.go` file
 - Keep different logical segments of the same package in different files
 - Avoid using `context.Background()`, `context.TODO()` or `nil` context in packages, use the context from caller
 - Use `log/slog` for logging; if logged arguments contain slices, wrap it with `logging.JSONValue` to keep spaces visible

@@ -593,6 +593,14 @@ func (fd *fileDownload) seqWait(off int64) error {
 // later block can win the race between its Lease returning and
 // seqBaseline running, pinning the watermark above the schedule's true
 // minimum and letting the earlier block's flushes bypass the commit gate.
+//
+// Tradeoff: this serializes lease calls per file in sequential mode, so a
+// leaser that blocks inside Lease (e.g. a slow DB call) holds up peer
+// workers' leases for that duration — and a peer parked on leaseMu does not
+// observe its own ctx cancellation until the holder's Lease returns.
+// Streaming and commits are unaffected, and sequential-mode throughput is
+// bounded by the in-order commit gate anyway, so the serialization does not
+// cost bandwidth.
 func (fd *fileDownload) leaseBlock(ctx context.Context) (Block, bool, error) {
 	if !fd.task.Sequential {
 		return fd.task.Leaser.Lease(ctx, fd.task.FileID)
