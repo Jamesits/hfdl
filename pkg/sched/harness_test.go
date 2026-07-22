@@ -67,6 +67,7 @@ type fixtureHub struct {
 	bytesOut int64          // payload bytes served by resolve
 	active   map[string]int // in-flight resolve requests per path
 	maxPaths int            // high-water of concurrently active distinct paths
+	maxSame  int            // high-water of concurrent requests to one path
 
 	// failure injection
 	tree429Left  int            // number of 429s to emit for tree
@@ -168,6 +169,16 @@ func (h *fixtureHub) maxConcurrentPaths() int {
 	h.mu.Lock()
 	defer h.mu.Unlock()
 	return h.maxPaths
+}
+
+// maxConcurrentSamePath reports the high-water mark of in-flight resolve
+// requests to a single path — i.e. the peak per-file block-download
+// concurrency the server actually saw. It is a durable latch, so a test can
+// assert on it after the run without racing a transient gauge.
+func (h *fixtureHub) maxConcurrentSamePath() int {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	return h.maxSame
 }
 
 func (h *fixtureHub) repo404(w http.ResponseWriter, r *http.Request) bool {
@@ -304,6 +315,9 @@ func (h *fixtureHub) handleResolve(w http.ResponseWriter, r *http.Request) {
 	h.active[path]++
 	if len(h.active) > h.maxPaths {
 		h.maxPaths = len(h.active)
+	}
+	if h.active[path] > h.maxSame {
+		h.maxSame = h.active[path]
 	}
 	h.mu.Unlock()
 	defer func() {

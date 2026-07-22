@@ -107,19 +107,28 @@ func TestInstallCacheModeLayout(t *testing.T) {
 	if fi.Mode()&os.ModeSymlink == 0 {
 		t.Fatalf("%s is not a symlink (mode %v)", final, fi.Mode())
 	}
+	// The target is a relative pointer into blobs/. Assert its meaning (relative
+	// + resolves to the blob, which encodes the correct ../ depth) via native
+	// path ops rather than a fixed string: os.Readlink returns OS-native
+	// separators (backslashes on Windows), so a literal forward-slash compare
+	// would be a false Windows failure.
 	target, err := os.Readlink(final)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if want := "../../../../blobs/" + testBlobID; target != want {
-		t.Errorf("symlink target = %q, want %q", target, want)
+	if filepath.IsAbs(target) {
+		t.Errorf("symlink target %q is absolute, want relative", target)
+	}
+	if got := filepath.Clean(filepath.Join(filepath.Dir(final), target)); got != s.BlobPath(testBlobID) {
+		t.Errorf("symlink resolves to %q, want blob %q", got, s.BlobPath(testBlobID))
 	}
 	content, err := os.ReadFile(final)
 	if err != nil || string(content) != string(testBlobData) {
 		t.Errorf("resolved content mismatch, err=%v", err)
 	}
 
-	// Root-level file: one less "..".
+	// Root-level file: one less ".." than the nested a/b.txt above. The
+	// resolve-to-blob check validates that reduced depth OS-agnostically.
 	final2, err := in.Install(t.Context(), cacheRequest(cacheDir, "config.json"))
 	if err != nil {
 		t.Fatal(err)
@@ -128,8 +137,11 @@ func TestInstallCacheModeLayout(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if want := "../../../blobs/" + testBlobID; target2 != want {
-		t.Errorf("symlink target = %q, want %q", target2, want)
+	if filepath.IsAbs(target2) {
+		t.Errorf("symlink target %q is absolute, want relative", target2)
+	}
+	if got := filepath.Clean(filepath.Join(filepath.Dir(final2), target2)); got != s.BlobPath(testBlobID) {
+		t.Errorf("root-level symlink resolves to %q, want blob %q", got, s.BlobPath(testBlobID))
 	}
 
 	// Reinstalling the same file is idempotent.

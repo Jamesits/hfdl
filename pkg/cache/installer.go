@@ -191,10 +191,12 @@ func (in *Installer) installCache(ctx context.Context, r InstallRequest, blobPat
 	if err != nil {
 		return "", fmt.Errorf("cache: relative blob target: %w", err)
 	}
-	// huggingface_hub stores forward-slash symlink targets; filepath.Rel yields
-	// backslashes on Windows, so normalize for cross-platform cache parity (the
-	// pointer must resolve the same regardless of the OS that wrote it).
-	relTarget = filepath.ToSlash(relTarget)
+	// relTarget keeps the OS-native separators filepath.Rel produced: forward
+	// slashes on Unix, backslashes on Windows. This matches huggingface_hub,
+	// which likewise stores os.path.relpath output per platform, and it is what
+	// the OS can actually follow — Windows normalizes a relative symlink target
+	// to backslashes at creation regardless of what is passed in, so forcing
+	// forward slashes here would not survive on disk anyway.
 
 	// Fallback chain symlink → hardlink → copy: symlinks may be unavailable
 	// (EPERM on Windows without developer mode), and hardlinks fail
@@ -394,7 +396,7 @@ func (in *Installer) placeSymlink(relTarget, final, blobPath string) error {
 	if !errors.Is(err, os.ErrExist) {
 		return err
 	}
-	if ok, serr := sameBlob(final, relTarget, blobPath); serr == nil && ok {
+	if ok, serr := sameBlob(final, blobPath); serr == nil && ok {
 		return nil
 	}
 	if rerr := os.Remove(final); rerr != nil {
@@ -412,7 +414,7 @@ func (in *Installer) placeHardlink(blobPath, final string) error {
 	if !errors.Is(err, os.ErrExist) {
 		return err
 	}
-	if ok, serr := sameBlob(final, "", blobPath); serr == nil && ok {
+	if ok, serr := sameBlob(final, blobPath); serr == nil && ok {
 		return nil
 	}
 	if rerr := os.Remove(final); rerr != nil {
@@ -421,29 +423,24 @@ func (in *Installer) placeHardlink(blobPath, final string) error {
 	return in.linkFn(blobPath, final)
 }
 
-// sameBlob reports whether final already designates blobPath: either a
-// symlink with the exact expected target, or a hardlink to the same inode.
-func sameBlob(final, relTarget, blobPath string) (bool, error) {
-	fi, err := os.Lstat(final)
+// sameBlob reports whether final already designates blobPath — a symlink
+// resolving to it, or a hardlink to the same inode. Identity is compared with
+// os.SameFile after os.Stat follows the link through to its target, never by
+// matching the readlink string: Windows stores a relative symlink target with
+// backslashes regardless of the separators passed to os.Symlink, so a string
+// compare would spuriously miss an already-correct pointer and force a needless
+// relink on every idempotent reinstall. A dangling symlink fails os.Stat and is
+// reported not-same (the caller then replaces it).
+func sameBlob(final, blobPath string) (bool, error) {
+	fi, err := os.Stat(final) // follows a symlink through to the blob
 	if err != nil {
 		return false, err
-	}
-	if fi.Mode()&os.ModeSymlink != 0 {
-		target, err := os.Readlink(final)
-		if err != nil {
-			return false, err
-		}
-		return target == relTarget, nil
 	}
 	bi, err := os.Stat(blobPath)
 	if err != nil {
 		return false, err
 	}
-	fi2, err := os.Stat(final)
-	if err != nil {
-		return false, err
-	}
-	return os.SameFile(bi, fi2), nil
+	return os.SameFile(fi, bi), nil
 }
 
 // volumeAttrs records src/dst volume ids on an fcio.copy span.

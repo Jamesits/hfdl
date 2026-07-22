@@ -168,19 +168,30 @@ func (m *Manager) activeDestRoots() []string {
 	return append([]string(nil), m.dests...)
 }
 
-// insideDir reports whether path lies inside dir (both absolute, cleaned). The
-// comparison is case-insensitive: on case-insensitive filesystems (macOS,
-// Windows) a reference inside the cache/dest under a different case must still
-// be excluded, or it could salvage from a mid-write install target. Over-
-// exclusion on case-sensitive filesystems only skips a rare case-variant
-// salvage source, which is safe (that content still downloads).
+// insideDir reports whether path lies at or beneath dir, comparing by OS file
+// identity (os.SameFile) instead of string form. path is already symlink-
+// resolved (statReference stores the filepath.EvalSymlinks result), but dir —
+// the cache or destination root — may reach here in a divergent spelling that a
+// string prefix test would miss even after Clean: macOS /var vs /private/var, a
+// Windows 8.3 short name (%TEMP% is C:\Users\RUNNER~1\... but the resolved form
+// is the long name), or a different case on a case-insensitive volume. Walking
+// path's ancestors and matching each against dir by identity is separator-,
+// case- and symlink-agnostic. A dir that does not exist contains nothing.
 func insideDir(path, dir string) bool {
-	dir = strings.ToLower(filepath.Clean(dir))
-	path = strings.ToLower(filepath.Clean(path))
-	if path == dir {
-		return true
+	di, err := os.Stat(dir)
+	if err != nil {
+		return false
 	}
-	return strings.HasPrefix(path, dir+string(os.PathSeparator))
+	for path = filepath.Clean(path); ; {
+		if pi, serr := os.Stat(path); serr == nil && os.SameFile(pi, di) {
+			return true
+		}
+		parent := filepath.Dir(path)
+		if parent == path {
+			return false // reached the volume root without a match
+		}
+		path = parent
+	}
 }
 
 // findSalvageMatch returns a hashed reference matching the file's size and

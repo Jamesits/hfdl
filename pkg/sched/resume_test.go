@@ -159,13 +159,21 @@ func TestRecoverStartupRequeues(t *testing.T) {
 // TestSetLimitsHot: bandwidth bucket and per-file conns update live; pause
 // suspends the download and install queues.
 func TestSetLimitsHot(t *testing.T) {
-	// 4 MiB = four 1 MiB blocks: enough to observe Conns grow past 1 while the
-	// download is in flight, without paying the race detector's per-byte cost
-	// of a larger transfer.
+	// 4 MiB in 256 KiB blocks = 16 blocks: a deep enough pending backlog that
+	// the four workers, once SetParallelism spawns them, overlap across several
+	// lease rounds. With only a handful of blocks a single unlucky scheduling —
+	// worker 0 draining them serially before its peers connect — can leave peak
+	// concurrency at 1 (the block-leaser serializes on SQLite, so each round's
+	// overlap window is thin under -race); many rounds make non-overlap
+	// vanishingly unlikely. The byte count stays small to bound the race
+	// detector's per-byte cost.
 	want := makeContent(4<<20, 43)
 	hub := newFixtureHub(t, map[string][]byte{"big.bin": want}, "big.bin")
 	hub.delay = 30 * time.Millisecond
-	env := newTestEnv(t, hub, withLimits(func(l *config.Limits) { l.Conns = 1 }))
+	env := newTestEnv(t, hub, withLimits(func(l *config.Limits) {
+		l.Conns = 1
+		l.BlockSize = 256 << 10
+	}))
 	ctx := t.Context()
 
 	if err := env.manager.Submit(ctx, Job{Repo: "org/repo"}); err != nil {
@@ -188,14 +196,17 @@ func TestSetLimitsHot(t *testing.T) {
 		t.Errorf("bandwidth bucket rate = %d, want 12345678 after SetLimits", got)
 	}
 
-	// Hot conns: SetParallelism grows the live worker set; the fixture
-	// observes more than one concurrent request for the file.
-	waitFor(t, "parallelism grew", func() bool {
-		return env.reg.Snapshot().Conns > 1
-	})
-
+	// Hot conns: SetParallelism grew the live worker set. Assert on the
+	// fixture's durable high-water mark of concurrent requests to the file
+	// rather than the instantaneous stats gauge: the block-leaser serializes on
+	// SQLite, so the overlap window is a thin, bursty transient a polled gauge
+	// (waitFor) routinely misses under load, whereas the latch captures the peak
+	// however brief.
 	if err := <-runErr; err != nil {
 		t.Fatalf("Run: %v", err)
+	}
+	if got := hub.maxConcurrentSamePath(); got < 2 {
+		t.Errorf("SetParallelism did not grow concurrency: peak concurrent requests = %d, want >= 2", got)
 	}
 }
 

@@ -20,6 +20,7 @@ High-speed Hugging Face downloader.
 
 ## System Programming Guide
 - All IO operations with known access pattern (sequentical read/write, metadata access only) should be hinted to the OS
+- Same-file comparison must use OS API instead of fiddling with string based path separator replacements
 
 ## Development
 Always perform a full rebuild with `goreleaser build --snapshot --clean`, and use the artifacts under `dist/`. When compiling individual programs for testing, output to `out/`. Run `go vet ./...` (must be run in `GOOS`/`GOARCH` matrix), `golangci-lint run` and `go fmt ./...` after code change.

@@ -489,9 +489,10 @@ func TestSetParallelismLive(t *testing.T) {
 	if fx.maxInFlight() < 3 {
 		t.Fatalf("no scaled-up concurrency: max in-flight %d", fx.maxInFlight())
 	}
-	if evs.count(EventCheckpoint) == 0 {
-		t.Fatal("no downscale-flush checkpoint")
-	}
+	// The checkpoint event is emitted inside Run (drain flushes and the forced
+	// final checkpoint) but the collector drains the channel asynchronously, so
+	// poll rather than sampling once right after <-runDone.
+	waitFor(t, "checkpoint event", 5*time.Second, func() bool { return evs.count(EventCheckpoint) > 0 })
 	final := prog.last(t)
 	if len(final.Missing(size)) != 0 {
 		t.Fatal("final progress incomplete")
